@@ -29,31 +29,23 @@ func InitializeDB(cfg *DBConfig) (err error) {
     return
 }
 
-var collections = []string {
-	"Repository",
-	"File",
-	"Identifier",
+func GetDB() *arango.Database {
+	return db
 }
 
 // Resets database state -- drops collections and then re-creates it (for debugging :) )
 // if fails, will exit server
 func ResetDB() {
-	var err error 
-	
-	for _, name := range collections {
-		if db.ColExist(name) {
-			db.DropCollection(name)
-		}
-		
-		err = db.CreateCollection(arango.NewCollectionOptions(name, false))
-		if err != nil {
-			log.Fatalln(err)
-		}
+	for _, collection := range db.Collections {
+		db.DropCollection(collection.Name)
 	}
 	
-	// indexes
+	// Repository
+	db.CreateCollection(arango.NewCollectionOptions("Repository", false))
+	
+	// File 
+	db.CreateCollection(arango.NewCollectionOptions("File", false))
 	db.Col("File").CreateHash(false, "Path")
-	db.Col("Identifier").CreateFullText(3, "Identifier")
 	
 	log.Println("Database was recreated")
 }

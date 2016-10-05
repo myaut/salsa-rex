@@ -2,6 +2,7 @@ package salsarex
 
 import (
 	"os"
+	"fmt"
 	"log"
 	"strings"
 	"path/filepath"
@@ -9,9 +10,11 @@ import (
 	"sync/atomic"
 	
 	"salsacore"
+	
+	"aranGO/aql"
 )
 
-type RepositoryParseTask struct {
+type RepositoryProcessingTask struct {
 	Repository
 	
 	taskType string
@@ -20,17 +23,28 @@ type RepositoryParseTask struct {
 	// then we didn't complete walking over it
 	totalFiles int32 
 	
-	// Amount of files that are already parsed 
-	parsedFiles int32
+	// Amount of files that are already parsed/processed by indexers 
+	processedFiles int32
+	
+	// List of indexers to run
+	indexers []Indexer
+	
+	// Semaphore to regulate number of running parser/indexer routines
+	routinesChannel chan int32
 }
 
-type RepositoryParseTaskTable map[string]*RepositoryParseTask
+type repositoryProcessingTaskTable map[string]*RepositoryProcessingTask
 
 // Global map of repository parsing tasks
 var (
 	mu sync.RWMutex
-	taskMap RepositoryParseTaskTable = make(RepositoryParseTaskTable)
+	taskMap = make(repositoryProcessingTaskTable)
+	maxProcessingRoutines = 768
 )
+
+func SetMaxProcessingRoutines(value int) {
+	maxProcessingRoutines = value
+}
 
 // Create repository and submit parsing task and returns its Id in repo.RepoId
 func CreateParseTask(repo *salsacore.Repository) (repoKey string, err error) {
@@ -38,24 +52,57 @@ func CreateParseTask(repo *salsacore.Repository) (repoKey string, err error) {
 	
 	obj := NewRepository(repo)
 	
-	err = obj.Save()
+	err = db.Col("Repository").Save(obj)
 	if err == nil {
 		repoKey = obj.Document.Key
-		task := createParseTask(obj, "parse")
-		go walkRepository(task)
+		task := createProcessingTask(obj, "parse")
+		task.indexers, err = createIndexers(repo.Lang, repo.Indexers, []string{})
+		
+		if err == nil {
+			err = startIndexing(task)
+			if err == nil {
+				go walkRepository(task)
+			}
+		}
+	}
+	
+	return
+}
+
+func CreateIndexingTask(repoKey string, indexer string) (err error) {
+	var repo Repository
+	
+	err = db.Col("Repository").Get(repoKey, &repo)
+	if err != nil {
+		return fmt.Errorf("Unknown repository %s: %v", repoKey, err)
+	}
+	
+	task := createProcessingTask(&repo, indexer)
+	task.indexers, err = createIndexers(repo.Lang, []string{indexer}, repo.Indexers)
+	if err == nil {
+		// Add names of created indexers to repository & save it
+		for _, indexer := range task.indexers {
+			repo.Indexers = append(repo.Indexers, indexer.GetName()) 
+		}
+		db.Col("Repository").Replace(repo.Key, &repo)
+		
+		err = startIndexing(task)
+		if err == nil {
+			go indexRepository(task)
+		}
 	}
 	
 	return
 }
 
 // Returns parsed/total values or -1,-1 if parsing/processing task not found
-func GetParsingTaskStatus(taskType, repoKey string) (status salsacore.RepositoryParsingStatus) {
+func GetProcessingTaskStatus(taskType, repoKey string) (status salsacore.RepositoryProcessingStatus) {
 	mu.RLock()
 	defer mu.RUnlock()
 	
 	task, ok := taskMap[taskType + ":" + repoKey]
 	if ok {
-		status.Parsed = atomic.LoadInt32(&task.parsedFiles)
+		status.Processed = atomic.LoadInt32(&task.processedFiles)
 		status.Total = atomic.LoadInt32(&task.totalFiles)
 	} else {
 		status.Total = -1
@@ -64,13 +111,14 @@ func GetParsingTaskStatus(taskType, repoKey string) (status salsacore.Repository
 	return
 }
 
-func createParseTask(repo *Repository, taskType string) *RepositoryParseTask {
+func createProcessingTask(repo *Repository, taskType string) *RepositoryProcessingTask {
 	mu.Lock()
 	defer mu.Unlock()
 	
-	task := new(RepositoryParseTask)
+	task := new(RepositoryProcessingTask)
 	task.Repository = *repo
 	task.taskType = taskType
+	task.routinesChannel = make(chan int32, maxProcessingRoutines)
 	
 	taskMap[taskType + ":" + repo.Key] = task
 	
@@ -78,7 +126,7 @@ func createParseTask(repo *Repository, taskType string) *RepositoryParseTask {
 }
 
 // Walks repository and submits parsing/lexing jobs
-func walkRepository(task *RepositoryParseTask) {
+func walkRepository(task *RepositoryProcessingTask) {
 	validExtensions := getValidExtensions(task)
 	var totalFiles int32 = 0
 	
@@ -98,15 +146,10 @@ func walkRepository(task *RepositoryParseTask) {
 		return nil
 	})
 	
-	if totalFiles == 0 {
-		// Oops, nothing was found
-		deleteParsingTask(task)
-	} else {
-		atomic.AddInt32(&task.totalFiles, totalFiles)
-	}
+	setTotalFiles(task, totalFiles)
 }
 
-func getValidExtensions(task *RepositoryParseTask) []string {
+func getValidExtensions(task *RepositoryProcessingTask) []string {
 	validExtensions := make([]string, 0, 10)
 	lang := task.Repository.Lang 
 	
@@ -132,8 +175,9 @@ func hasValidExtension(path string, validExtensions []string) bool {
 	return false
 }
 
-func parseFile(task *RepositoryParseTask, file *RepositoryFile) {
-	defer finishParsingFile(task)
+func parseFile(task *RepositoryProcessingTask, file *RepositoryFile) {
+	task.routinesChannel <- 1
+	defer finishProcessingFile(task)
 	
 	// Open file
 	absPath := filepath.Join(task.Repository.Path, file.Path)
@@ -146,27 +190,100 @@ func parseFile(task *RepositoryParseTask, file *RepositoryFile) {
 	// Tokenize
 	var l Lexer
 	l.Init(f, file.Path, task.Repository.Lang)
+	// TODO: estimate number of tokens based on file size
+	file.Tokens = make([]salsacore.Token, 0, 1000)
 	for t := l.LexScan() ; t.Type != salsacore.EOF ; t = l.LexScan() {
 		file.Tokens = append(file.Tokens, t)
 	}
 	
-	err = file.Save()
+	err = f.Close()
+	if err == nil {
+		err = db.Col("File").Save(file)
+	}
 	if err != nil {
 		log.Printf("Error parsing %s: %v", absPath, err)
 		return		
 	}
 	
-	// TODO: when completed, run indexers on it
+	runIndexers(task, file)
 }
 
-func finishParsingFile(task* RepositoryParseTask) {
-	parsedFiles := atomic.AddInt32(&task.parsedFiles, 1)
-	if parsedFiles == atomic.LoadInt32(&task.totalFiles) {
-		deleteParsingTask(task)
+func startIndexing(task *RepositoryProcessingTask) error {
+	for i, indexer := range task.indexers {
+		err := indexer.StartIndexing(&task.Repository)
+		if err != nil {
+			// rollback started indexers
+			for j := i ; j >= 0 ; j -= 1 {
+				task.indexers[j].FinishIndexing(&task.Repository)
+			}
+			
+			return err
+		}
+	}
+	
+	return nil
+}
+
+func indexRepository(task *RepositoryProcessingTask) error {
+	q := aql.NewQuery(`
+		FOR f in File
+		FILTER f.Repository == @Repository 
+		RETURN f`)
+	q.AddBind("Repository", task.Repository.Key)
+	
+	cur, err := db.Execute(q)
+	if err != nil {
+		setTotalFiles(task, 0)
+		return err
+	}
+	
+	setTotalFiles(task, int32(cur.Count()))
+	
+	file := new(RepositoryFile)
+	for cur.FetchOne(file) {
+		go indexFile(task, file)
+		file = new(RepositoryFile)
+	}
+	return nil
+}
+
+func indexFile(task *RepositoryProcessingTask, file *RepositoryFile) {
+	task.routinesChannel <- 1
+	defer finishProcessingFile(task)
+	
+	runIndexers(task, file)
+}
+
+func runIndexers(task *RepositoryProcessingTask, file *RepositoryFile) {
+	for _, indexer := range task.indexers {
+		indexer.CreateIndex(&task.Repository, file)
 	}
 }
 
-func deleteParsingTask(task *RepositoryParseTask) {
+func setTotalFiles(task* RepositoryProcessingTask, totalFiles int32) {
+	if totalFiles == 0 {
+		// Oops, nothing was found
+		deleteProcessingTask(task)
+	} else {
+		atomic.AddInt32(&task.totalFiles, totalFiles)
+	}
+}
+
+func finishProcessingFile(task* RepositoryProcessingTask) {
+	processedFiles := atomic.AddInt32(&task.processedFiles, 1)
+	
+	if processedFiles == atomic.LoadInt32(&task.totalFiles) {
+		for _, indexer := range task.indexers {
+			indexer.FinishIndexing(&task.Repository)
+		}
+		
+		deleteProcessingTask(task)
+	} else {
+		<- task.routinesChannel
+	}
+}
+
+func deleteProcessingTask(task *RepositoryProcessingTask) {
 	// this was last file to be parsed -- request is satisfied
 	mu.Lock()
 	defer mu.Unlock()

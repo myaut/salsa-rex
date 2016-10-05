@@ -62,3 +62,12 @@ func readPostData(rw http.ResponseWriter, rq *http.Request, value interface{}) b
 func writeResponse(rw http.ResponseWriter, value interface{}) {
 	json.NewEncoder(rw).Encode(value)
 }
+
+func writeResponseOrError(rw http.ResponseWriter, err error, value interface{}) {
+	if err != nil {
+		http.Error(rw, err.Error(), 400)
+	} else {
+		writeResponse(rw, value)
+	}
+}
+

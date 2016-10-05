@@ -51,11 +51,14 @@ type Repository struct {
 	
 	// Language -- one of C, CPP or JAVA
 	Lang string
+
+	// List of indexers that were applied to this repository 
+	Indexers []string
 }
 
-type RepositoryParsingStatus struct {
+type RepositoryProcessingStatus struct {
 	Total int32
-	Parsed int32
+	Processed int32
 }
 
 type RepositoryFile struct {
@@ -65,14 +68,7 @@ type RepositoryFile struct {
 	Tokens []Token 
 }
 
-// -----------------
-// IDENTIFIER -- unique identifier in repository
-
-type Identifier struct {
-	Repository string
-	Identifier string
-	
-	// list of files those path contain this identifier
-	Files []string
+type TokenRef struct {
+	File string
+	Index int
 }
-

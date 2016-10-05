@@ -1,17 +1,22 @@
 package main
 
 import (
+	"os"
 	"fmt"
 	"log"
 	"flag"
+	"strconv"
 	
 	"syscall"
 	
 	"net/http"
 	
 	"salsarex"
+	"salsarex/indexer"
 	
 	"github.com/go-ini/ini"
+	
+	_ "net/http/pprof"
 )
 
 func main() {
@@ -35,10 +40,12 @@ func main() {
 		log.Fatalln(err)
 	}
 	
-	err = setFileLimit()
+	err = setupProcess(cfg)
 	if err != nil {
 		log.Println(err)
 	}
+	
+	registerIndexers()
 	
 	log.Fatalln(startServer(cfg, *backend))
 }
@@ -93,15 +100,45 @@ func startServer(cfg *ini.File, backend bool) (err error) {
 	return http.ListenAndServe(addr, nil)
 }
 
-func setFileLimit() error {
-	// increase file limit up to maximum allowed
+func setupProcess(cfg *ini.File) (err error) {
+	procCfg := struct {
+		NoFile uint64
+		MallocArenaMax int
+		MaxProcessingRoutines int
+	}{}
+	err = cfg.Section("process").MapTo(&procCfg)
+		
+	if err == nil && procCfg.NoFile > 0 {
+		// increase/decrease file limit according to config
+		err = setRLimit(syscall.RLIMIT_NOFILE, procCfg.NoFile)
+	}
+	
+	if err == nil && procCfg.MallocArenaMax > 0 {
+		err = os.Setenv("MALLOC_ARENA_MAX", strconv.Itoa(procCfg.MallocArenaMax))
+	}
+	
+	if err == nil && procCfg.MaxProcessingRoutines > 0 {
+		salsarex.SetMaxProcessingRoutines(procCfg.MaxProcessingRoutines)
+	}
+	
+	return
+}
+
+func setRLimit(resource int, limit uint64) (err error) {
 	var rLimit syscall.Rlimit
 	
-	err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+	err = syscall.Getrlimit(resource, &rLimit)
 	if err != nil {
 		return err
 	}
 	
-	rLimit.Cur = rLimit.Max;
-	return syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+	rLimit.Cur = limit
+	return syscall.Setrlimit(resource, &rLimit)
+}
+
+// indexers global variables
+var identifierIndexer = indexer.NewIdentifierIndexer()
+
+func registerIndexers() {
+	salsarex.RegisterIndexer(identifierIndexer)
 }

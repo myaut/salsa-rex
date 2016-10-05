@@ -21,17 +21,14 @@ func createBackendAPIHandlers() (mux *http.ServeMux) {
 			var repo salsacore.Repository
 			if readPostData(rw, rq, &repo) {
 				repoKey, err := salsarex.CreateParseTask(&repo)
-				if err != nil {
-					http.Error(rw, err.Error(), 400)
-				} else {
-					writeResponse(rw, repoKey)
-				}
+				writeResponseOrError(rw, err, repoKey)
 			}
 	})
+	
 	mux.HandleFunc("/repo/taskstatus/", func (rw http.ResponseWriter, rq *http.Request) {
-			if parts, ok := parsePath(rq, "repo"); ok {
+			if parts, ok := parsePath(rq, "taskstatus"); ok {
 				// This is request for getting status
-				status := salsarex.GetParsingTaskStatus(parts[0], parts[1])
+				status := salsarex.GetProcessingTaskStatus(parts[0], parts[1])
 				writeResponse(rw, status)
 			}
 	})

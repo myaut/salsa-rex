@@ -9,13 +9,16 @@ import (
 	
 	"syscall"
 	
-	"net/http"
-	
 	"salsarex"
 	"salsarex/indexer"
 	
 	"github.com/go-ini/ini"
 	
+	"github.com/labstack/echo"
+	"github.com/labstack/echo/middleware"
+    "github.com/labstack/echo/engine/standard"
+	
+	"net/http"
 	_ "net/http/pprof"
 )
 
@@ -81,23 +84,40 @@ func startServer(cfg *ini.File, backend bool) (err error) {
 		return fmt.Errorf("Error in server configuration: %v", err)
 	}
 	
+	server := echo.New()
+	
+	// TODO: disable debug:
+	
+	// setup logging
+	middleware.DefaultLoggerConfig.Format = 
+		 `${time_rfc3339} ${remote_ip} ${method} ${uri} | ${status} ${latency_human} ${bytes_in}/${bytes_out}` + "\n";
+	server.Use(middleware.Logger())
+	
+	go http.ListenAndServe(":6060", nil)	// for pprof
+	
+	server.SetHTTPErrorHandler(func(err error, ctx echo.Context) {
+		log.Printf("ERROR: %s %s -> %v\n", ctx.Request().Method(), 
+						ctx.Request().URL().Path(), err)
+		
+		server.DefaultHTTPErrorHandler(err, ctx)
+	})
+	
+	// setup server routing & start
 	addr := fmt.Sprintf("%s:%d", srvCfg.Hostname, srvCfg.Port)
 	
 	if backend {
 		// create special multiplexer for /api on backend
-		apiMux := createBackendAPIHandlers()
-		http.Handle(srvCfg.APIRoot + "/", http.StripPrefix(srvCfg.APIRoot, apiMux))
+		createBackendAPIHandlers(srvCfg.APIRoot, server)
 		
 		log.Printf("Starting backend API server on http://%s%s...", addr, srvCfg.APIRoot)		
 	} else {
 		// create multiplexers for /api and /xref
-		apiMux := createFrontendAPIHandlers()
-		http.Handle(srvCfg.APIRoot + "/", http.StripPrefix(srvCfg.APIRoot, apiMux))
+		createFrontendAPIHandlers(srvCfg.APIRoot, server)
 		
 		log.Printf("Starting frontend API server on http://%s%s...", addr, srvCfg.APIRoot)
 	}
 	
-	return http.ListenAndServe(addr, nil)
+	return server.Run(standard.New(addr))
 }
 
 func setupProcess(cfg *ini.File) (err error) {
@@ -137,8 +157,9 @@ func setRLimit(resource int, limit uint64) (err error) {
 }
 
 // indexers global variables
-var identifierIndexer = indexer.NewIdentifierIndexer()
+var identifierIndexerFactory = new(indexer.IdentifierIndexerFactory)
 
 func registerIndexers() {
-	salsarex.RegisterIndexer(identifierIndexer)
+	salsarex.RegisterIndexer(identifierIndexerFactory)
 }
+

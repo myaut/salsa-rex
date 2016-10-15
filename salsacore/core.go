@@ -59,6 +59,7 @@ type Repository struct {
 type RepositoryProcessingStatus struct {
 	Total int32
 	Processed int32
+	Indexers int32
 }
 
 type RepositoryFile struct {

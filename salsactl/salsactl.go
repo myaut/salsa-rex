@@ -37,8 +37,8 @@ func main() {
 	    err = client.PostArguments("/repo", &repo)
 	    if err == nil {
 	    	repoKey, err = client.DecodeObjectKey()
+	    	fmt.Printf("Repository #%s created\n", repoKey)
 	    }
-	    fmt.Printf("Repository #%s created\n", repoKey)
 	    for ; err == nil && !completed ;  {
 	    	err, completed = pollRepoStatus(client, "parse", repoKey)
 	    }
@@ -61,7 +61,7 @@ func clearLine() {
 func pollRepoStatus(client *salsacore.Client, taskType, repoKey string) (error, bool) {
 	var status salsacore.RepositoryProcessingStatus
 	
-	err := client.GetValue("/repo/taskstatus/" + taskType + "/" + repoKey, &status)
+	err := client.GetValue("/repo/" + repoKey + "/taskstatus/" + taskType, &status)
 	if err != nil {
 		return err, true
 	}
@@ -75,7 +75,7 @@ func pollRepoStatus(client *salsacore.Client, taskType, repoKey string) (error, 
 	    	fmt.Printf("Processed %d sources", status.Processed)
 	    	time.Sleep(1 * time.Second)
     	default:
-	    	fmt.Printf("Processed %d/%d sources", status.Processed, status.Total)
+	    	fmt.Printf("Processed %d/%d sources (%d indexers)", status.Processed, status.Total, status.Indexers)
 	    	time.Sleep(500 * time.Millisecond)
 	}
 	

@@ -26,6 +26,9 @@ type RepositoryProcessingTask struct {
 	// Amount of files that are already parsed/processed by indexers 
 	processedFiles int32
 	
+	totalIndexers int32
+	completedIndexers int32
+	
 	// List of indexers to run
 	indexers []Indexer
 	
@@ -82,7 +85,7 @@ func CreateIndexingTask(repoKey string, indexer string) (err error) {
 	if err == nil {
 		// Add names of created indexers to repository & save it
 		for _, indexer := range task.indexers {
-			repo.Indexers = append(repo.Indexers, indexer.GetName()) 
+			repo.Indexers = append(repo.Indexers, indexer.GetFactory().GetName()) 
 		}
 		db.Col("Repository").Replace(repo.Key, &repo)
 		
@@ -96,7 +99,7 @@ func CreateIndexingTask(repoKey string, indexer string) (err error) {
 }
 
 // Returns parsed/total values or -1,-1 if parsing/processing task not found
-func GetProcessingTaskStatus(taskType, repoKey string) (status salsacore.RepositoryProcessingStatus) {
+func GetProcessingTaskStatus(repoKey, taskType string) (status salsacore.RepositoryProcessingStatus) {
 	mu.RLock()
 	defer mu.RUnlock()
 	
@@ -104,6 +107,7 @@ func GetProcessingTaskStatus(taskType, repoKey string) (status salsacore.Reposit
 	if ok {
 		status.Processed = atomic.LoadInt32(&task.processedFiles)
 		status.Total = atomic.LoadInt32(&task.totalFiles)
+		status.Indexers = atomic.LoadInt32(&task.totalIndexers)
 	} else {
 		status.Total = -1
 	}
@@ -210,11 +214,13 @@ func parseFile(task *RepositoryProcessingTask, file *RepositoryFile) {
 
 func startIndexing(task *RepositoryProcessingTask) error {
 	for i, indexer := range task.indexers {
+		atomic.AddInt32(&task.totalIndexers, 1)
 		err := indexer.StartIndexing(&task.Repository)
 		if err != nil {
 			// rollback started indexers
 			for j := i ; j >= 0 ; j -= 1 {
-				task.indexers[j].FinishIndexing(&task.Repository)
+				atomic.AddInt32(&task.totalIndexers, -1)
+				task.indexers[j].FinishIndexing()
 			}
 			
 			return err
@@ -256,7 +262,7 @@ func indexFile(task *RepositoryProcessingTask, file *RepositoryFile) {
 
 func runIndexers(task *RepositoryProcessingTask, file *RepositoryFile) {
 	for _, indexer := range task.indexers {
-		indexer.CreateIndex(&task.Repository, file)
+		indexer.CreateIndex(file)
 	}
 }
 
@@ -274,7 +280,8 @@ func finishProcessingFile(task* RepositoryProcessingTask) {
 	
 	if processedFiles == atomic.LoadInt32(&task.totalFiles) {
 		for _, indexer := range task.indexers {
-			indexer.FinishIndexing(&task.Repository)
+			indexer.FinishIndexing()
+			atomic.AddInt32(&task.totalIndexers, -1)
 		}
 		
 		deleteProcessingTask(task)

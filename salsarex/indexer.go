@@ -6,7 +6,17 @@ import (
 	"salsacore"
 )
 
+
 type Indexer interface {
+	// Indexes certain file
+	StartIndexing(repo *Repository) error
+	CreateIndex(file *RepositoryFile) error
+	FinishIndexing()
+	
+	GetFactory() IndexerFactory
+}
+
+type IndexerFactory interface {
 	// Creates collections and indexes in database
 	InitializeDatabase() error
 	
@@ -18,19 +28,17 @@ type Indexer interface {
 	// process source first, before running this one)
 	GetDependencies() []string
 	
-	// Indexes certain file
-	StartIndexing(repo *Repository) error
-	CreateIndex(repo *Repository, file *RepositoryFile) error
-	FinishIndexing(repo *Repository)
+	NewIndexer() Indexer
 	
 	// Deletes all items corresponding to a repository
 	DeleteIndex(repo *Repository)
 }
 
-var indexerRegistry = make(map[string]Indexer)
 
-func RegisterIndexer(indexer Indexer) {
-	indexerRegistry[indexer.GetName()] = indexer
+var indexerRegistry = make(map[string]IndexerFactory)
+
+func RegisterIndexer(factory IndexerFactory) {
+	indexerRegistry[factory.GetName()] = factory
 }
 
 // Sorts list of indexer names and spawns dependent indexes (if they 
@@ -66,15 +74,15 @@ func addIndexer(name string, context *createIndexersContext) error {
 		}
 	}
 	
-	indexer, ok := indexerRegistry[name]
+	indexerFactory, ok := indexerRegistry[name]
 	if !ok {
 		return fmt.Errorf("Requested indexer '%s' is not registered", name)
 	}
-	if !indexer.IsApplicable(context.language) {
+	if !indexerFactory.IsApplicable(context.language) {
 		return fmt.Errorf("Requested indexer '%s' is not applicable", name)
 	}
 	
-	for _, depName := range indexer.GetDependencies() {
+	for _, depName := range indexerFactory.GetDependencies() {
 		err := addIndexer(depName, context)
 		if err != nil {
 			return fmt.Errorf("Indexer '%s' depends on indexer '%s' which is not registered", name, depName)
@@ -82,7 +90,7 @@ func addIndexer(name string, context *createIndexersContext) error {
 	}
 	
 	context.createdIndexers = append(context.createdIndexers, name)
-	context.indexerInstances = append(context.indexerInstances, indexer)
+	context.indexerInstances = append(context.indexerInstances, indexerFactory.NewIndexer())
 	return nil
 }
 

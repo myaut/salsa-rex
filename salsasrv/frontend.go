@@ -1,22 +1,22 @@
 package main
 
 import (
-	"net/http"
+	_ "salsarex"
 	
-	"salsarex"
+	"github.com/labstack/echo"
 )
 
 // "main" function which registers all handlers
-func createFrontendAPIHandlers() (mux *http.ServeMux) {
-	mux = http.NewServeMux()
-	
-	mux.HandleFunc("/tokens/", func (rw http.ResponseWriter, rq *http.Request) {
+func createFrontendAPIHandlers(prefix string, server *echo.Echo) {
+	/*
+	server.GET(prefix + "/tokens/", func (ctx echo.Context) {
 			if fileId, ok := tryParsePathInt(rq, "tokens"); ok {
 				// /tokens/fid -> list of tokens  
 				tokens := salsarex.GetTokens(fileId)
 				writeResponse(rw, tokens)
 			}
+			
+			
 	})
-	
-	return 
+	*/
 }

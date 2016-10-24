@@ -16,7 +16,7 @@ import (
 	
 	"github.com/labstack/echo"
 	"github.com/labstack/echo/middleware"
-    "github.com/labstack/echo/engine/standard"
+	"github.com/labstack/echo/engine/standard"
 	
 	"net/http"
 	_ "net/http/pprof"
@@ -25,7 +25,7 @@ import (
 func main() {
 	configPath := flag.String("config", "", "path to config.ini")
 	backend := flag.Bool("backend", false, "start as front-end server")
-    flag.Parse()
+	flag.Parse()
 	
 	if len(*configPath) == 0 {
 		flag.Usage()

@@ -19,6 +19,7 @@ func main() {
 	// Find default config location -- either it provided with -config
 	// or located in ~/.salsarc
 	configPath := flag.String("config", handleHome("~/.salsarc"), "path to client.ini")
+	autoExec := flag.String("exec", "", "command to be automatically executed")
 	flag.Parse()
 	
 	if _, err := os.Stat(*configPath); os.IsNotExist(err) {
@@ -38,20 +39,25 @@ func main() {
 		log.Fatalln(err)
 	}
 	
-	// Fill in commands list and run
-	cliCfg.Commands = []fishly.Command {
-		new(listReposCmd),
-		new(selectReposCmd),
-	}
+	cliCfg.UserConfig.AutoExec = *autoExec
 	
-	fishly.Run(&cliCfg)
+	// Fill in commands list and run
+	registerCLICommands(&cliCfg)
+	cliCfg.Run()
 }
 
 func setupCLI(cfg *ini.File, cliCfg *fishly.Config) error {
 	// Setup cli environment
 	err := cfg.Section("cli").MapTo(&cliCfg.UserConfig)
-	if err != nil {
-		cfg.Section("salsa-cli").MapTo(&cliCfg.UserConfig)
+	if err == nil {
+		// Slices should be merged properly
+		baseHelp := cliCfg.UserConfig.Help
+		baseStyle := cliCfg.UserConfig.StyleSheet
+		
+		err = cfg.Section("salsa-cli").MapTo(&cliCfg.UserConfig)
+		
+		cliCfg.UserConfig.Help = append(cliCfg.UserConfig.Help, baseHelp...)
+		cliCfg.UserConfig.StyleSheet = append(cliCfg.UserConfig.StyleSheet, baseStyle...)
 	}
 	if err != nil {
 		return fmt.Errorf("Error in CLI configuration: %s", err)
@@ -67,12 +73,22 @@ func setupCLI(cfg *ini.File, cliCfg *fishly.Config) error {
 	return nil
 }
 
+func registerCLICommands(cliCfg *fishly.Config) {
+	cliCfg.RegisterCommand(new(listReposCmd), "repository", "ls")
+	cliCfg.RegisterCommand(new(selectRepoCmd), "repository", "select")
+}
+
 func promptFormatter(ctx *fishly.Context) string {
 	// TODO
 	return ""
 }
 
 func handleHome(path string) string {
+	// TODO: remove this debugging hack
+	if strings.HasSuffix(path, ".salsarc") {
+		return "client.ini"
+	}
+	
 	usr, _ := user.Current()
 	homeDir := "/tmp"
 	if usr != nil {

@@ -1,9 +1,23 @@
 package fishly
 
 import (
-	readline "gopkg.in/readline.v1"
+	"fmt"
+	
+	"github.com/go-ini/ini"	
+	
+	// readline "gopkg.in/readline.v1"
+	readline "github.com/chzyer/readline"
 )
 
+//
+// context -- context handling 
+//
+
+
+// Context state represents current execution state. It is very similar
+// to path on filesystem, but may have set variables with names.
+// Current conteext state determines availability of the commands
+// and their behaviour
 type ContextState struct {
 	// Hierarchial components of the path
 	Path []string
@@ -19,18 +33,37 @@ type ContextState struct {
 	isRoot bool
 }
 
+// Context is the overall state holder for currently executing 
+// fishly instance
 type Context struct {
 	// Context states history. first is current state,
 	// last is "root" state
 	states []ContextState
 	
-	// Configuration of CLI instance
+	// Configuration of Context instance
 	cfg *Config
+	
+	// ReadLine instance
 	rl *readline.Instance
 	
+	// Help contents for help command
+	help *ini.File
+	
+	// Stylesheet for text formatter
+	style *textStyleNode
+	
 	// Commands available in the current state
-	availableCommands []Command
+	availableCommands handlerTable
+	
+	// List of requests that are currently handling
+	requests []*Request
+	requestIndex int
+	
+	// For exit
+	running bool
+	exitCode int
 }
+
 
 // Sets current state of the context as root state
 func (ctx *Context) GetCurrentState() *ContextState {
@@ -39,7 +72,16 @@ func (ctx *Context) GetCurrentState() *ContextState {
 
 // Creates new state
 func (ctx *Context) PushState(isRoot bool) *ContextState {
-	currentState := ctx.GetCurrentState()
+	var currentState *ContextState
+	if len(ctx.states) > 0 {
+		currentState = ctx.GetCurrentState()
+	} else {
+		// First state
+		currentState = &ContextState{
+			Path: []string{},
+			Variables: map[string]string{},
+		}
+	}
 	
 	state := ContextState{
 		Path: make([]string, 0, len(currentState.Path)),
@@ -60,6 +102,7 @@ func (ctx *Context) PushState(isRoot bool) *ContextState {
 	return ctx.GetCurrentState()
 }
 
+// internal function that updates context after request has finished
 func (ctx *Context) tick() {
 	state := ctx.GetCurrentState()
 	if !state.isNew {
@@ -71,16 +114,43 @@ func (ctx *Context) tick() {
 	if len(state.Path) != 0 || len(state.Variables) != 0 {
 		prompt = ctx.cfg.PromptFormatter(ctx)
 	} 
+	
 	ctx.rl.SetPrompt(ctx.cfg.PromptProgram + " " + prompt + ctx.cfg.PromptSuffix)
 	
 	// Re-compute list of available commands
-	ctx.availableCommands = make([]Command, 0, len(ctx.cfg.Commands))
-	for _, command := range ctx.cfg.Commands {
-		if command.IsApplicable(ctx) {
-			ctx.availableCommands = append(ctx.availableCommands, command)
+	ctx.availableCommands = make(handlerTable)
+	for index, _ := range ctx.cfg.handlers {
+		descriptor := &ctx.cfg.handlers[index]
+		command := ctx.cfg.getCommandFromDescriptor(descriptor)
+		
+		if command == nil || !command.IsApplicable(ctx) {
+			continue
 		}
+		
+		ctx.availableCommands[descriptor.name] = descriptor
 	}
 	
 	state.isNew = false
 }
 
+// (Re-)loads configuration files (help, style)
+func (ctx *Context) reload() (err error) {
+	// Load help files
+	helpFiles := make([]interface{}, len(ctx.cfg.Help))
+	for index, helpFile := range ctx.cfg.Help {
+		helpFiles[index] = helpFile
+	}
+	
+	ctx.help, err = ini.Load(helpFiles[0], helpFiles[1:]...)
+	if err != nil {
+		return 
+	}
+	
+	// Create root node and load text styles
+	ctx.style = newTextStyleNode()
+	return LoadStyleSheet(ctx.cfg.StyleSheet, ctx.style)	
+}
+
+func (ctx *Context) rewindState(where string) (err error) {
+	return fmt.Errorf("not implemented")
+}

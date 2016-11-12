@@ -6,6 +6,7 @@ import (
 	"log"
 	
 	"os"
+	"os/signal"
 		
 	"strings"
 	
@@ -72,9 +73,9 @@ type Config struct {
 	DefaultTextFormatter IOFormatter
 }
 
-func (cfg *Config) Run() int {
+func (cfg *Config) Run(extCtx ExternalContext) int {
 	// runs main command loop
-	ctx, err := newContext(cfg)
+	ctx, err := newContext(cfg, extCtx)
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -101,9 +102,10 @@ func (cfg *Config) Run() int {
 	return ctx.exitCode
 }
 
-func newContext(cfg *Config) (*Context, error) {
+func newContext(cfg *Config, extCtx ExternalContext) (*Context, error) {
 	// Create and setup context object
 	ctx := new(Context)
+	ctx.External = extCtx
 	ctx.cfg = cfg
 	ctx.reload()
 	
@@ -178,7 +180,10 @@ func (ctx *Context) parseRequests(line string) {
 
 func (ctx *Context) processRequest() (err error) {
 	rq := ctx.requests[ctx.requestIndex]
+	rq.Id = ctx.requestId
+	
 	ctx.requestIndex++
+	ctx.requestId++
 	
 	if rq.command == nil {
 		err = ctx.executeBuiltinRequest(rq) 
@@ -212,6 +217,25 @@ func (ctx *Context) executeRequest(rq *Request) (error) {
 		if r := recover(); r != nil {
 			log.Printf("Command caused a panic: %v", r)
 		} 
+	}()
+	
+	// Setup ^C handler. 
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	go func(){
+	    sigNum := <- c
+	    if sigNum == os.Interrupt {
+	    	rq.Cancelled = true
+	    	ctx.External.Cancel(rq)
+	    	log.Print("INTERRUPTED")
+	    	
+	    	// Reset to default handler so following ^C will kill app 
+	    	signal.Reset(os.Interrupt)
+	    }
+	}()
+	defer func() {
+		close(c)
+		signal.Reset(os.Interrupt)
 	}()
 	
 	return rq.command.Execute(ctx, rq)

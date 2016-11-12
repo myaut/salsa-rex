@@ -17,6 +17,12 @@ type Request struct {
 	// string may be saved to options 
 	Options interface{}
 	
+	// Flag indicating that request was interrupted
+	Cancelled bool
+	
+	// Id assigned to this request (incremented, unique in single fishly session)
+	Id int 
+	
 	// Name of the command or builtin
 	commandName string
 	

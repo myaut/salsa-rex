@@ -33,9 +33,19 @@ type ContextState struct {
 	isRoot bool
 }
 
+type ExternalContext interface {
+	// Cancels blocked operations which are currently running in
+	// corresponding request (cpu-greedy operations should check
+	// rq.Cancelled flag) 
+	Cancel(rq *Request)
+}
+
 // Context is the overall state holder for currently executing 
 // fishly instance
 type Context struct {
+	// External context used by program currently executing 
+	External ExternalContext
+	
 	// Context states history. first is current state,
 	// last is "root" state
 	states []ContextState
@@ -58,6 +68,7 @@ type Context struct {
 	// List of requests that are currently handling
 	requests []*Request
 	requestIndex int
+	requestId int
 	
 	// For exit
 	running bool

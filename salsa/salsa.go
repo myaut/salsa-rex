@@ -11,8 +11,13 @@ import (
 	"flag"
 	
 	"fishly"
+	"salsacore/client"
 	
 	"github.com/go-ini/ini"
+)
+
+const (
+	defaultServerName = "main"
 )
 
 func main() {
@@ -33,8 +38,14 @@ func main() {
 	}
 	
 	var cliCfg fishly.Config
+	salsaCtx := NewSalsaContext()
 	
 	err = setupCLI(cfg, &cliCfg)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	
+	err = loadServers(cfg, salsaCtx)
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -43,7 +54,7 @@ func main() {
 	
 	// Fill in commands list and run
 	registerCLICommands(&cliCfg)
-	cliCfg.Run()
+	cliCfg.Run(salsaCtx)
 }
 
 func setupCLI(cfg *ini.File, cliCfg *fishly.Config) error {
@@ -70,6 +81,31 @@ func setupCLI(cfg *ini.File, cliCfg *fishly.Config) error {
 	cliCfg.PromptProgram = "salsa"
 	cliCfg.PromptSuffix = "> "
 	cliCfg.PromptFormatter = promptFormatter
+	return nil
+}
+
+func loadServers(cfg *ini.File, ctx *SalsaContext) error {
+	for _, section := range cfg.Sections() {
+		if !strings.HasPrefix(section.Name(), "salsasrv") {
+			continue
+		}
+		
+		// If no suffix is provided use name "main"
+		var srv client.ServerConnection
+		srv.Name = defaultServerName
+		index := strings.Index(section.Name(), "-")
+		if index > 0 {
+			srv.Name = section.Name()[index+1:]
+		} 
+		
+		err := section.MapTo(&srv)
+		if err != nil {
+			return err
+		}
+		
+		ctx.handle.Servers = append(ctx.handle.Servers, srv) 
+	} 
+	
 	return nil
 }
 

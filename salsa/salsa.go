@@ -80,7 +80,6 @@ func setupCLI(cfg *ini.File, cliCfg *fishly.Config) error {
 	// Setup prompt formatter
 	cliCfg.PromptProgram = "salsa"
 	cliCfg.PromptSuffix = "> "
-	cliCfg.PromptFormatter = promptFormatter
 	return nil
 }
 
@@ -112,11 +111,6 @@ func loadServers(cfg *ini.File, ctx *SalsaContext) error {
 func registerCLICommands(cliCfg *fishly.Config) {
 	cliCfg.RegisterCommand(new(listReposCmd), "repository", "ls")
 	cliCfg.RegisterCommand(new(selectRepoCmd), "repository", "select")
-}
-
-func promptFormatter(ctx *fishly.Context) string {
-	// TODO
-	return ""
 }
 
 func handleHome(path string) string {

@@ -17,9 +17,9 @@ import (
 type listReposCmd struct {
 }
 type listReposOpt struct {
+	Server string 	`opt:"server|s,opt"`
+	
 	Name string 	`arg:"1,opt"`
-	Version string 	`arg:"2,opt"`
-	Lang string 	`arg:"3,opt"`
 }
 
 func (*listReposCmd) IsApplicable(ctx *fishly.Context) bool {
@@ -30,8 +30,19 @@ func (*listReposCmd) NewOptions() interface{} {
 	return new(listReposOpt)
 }
 
-func (*listReposCmd) Complete(ctx *fishly.Context, option string) []string {
-	return []string{}
+func (*listReposCmd) Complete(ctx *fishly.Context, rq *fishly.CompleterRequest) {
+	salsaCtx := ctx.External.(*SalsaContext)
+	
+	switch rq.ArgIndex {
+		case 0:
+			switch rq.Option {
+				case "server":
+					for _, srv := range salsaCtx.handle.Servers {
+						rq.AddOption(srv.Name)
+					}
+			}
+		// case 1: -- repository names 
+	}
 }
 
 func (cmd *listReposCmd) Execute(ctx *fishly.Context, rq *fishly.Request) error {
@@ -40,8 +51,6 @@ func (cmd *listReposCmd) Execute(ctx *fishly.Context, rq *fishly.Request) error 
 	
 	_, err := cmd.findRepositories(salsaCtx, rq.Id, -1, &salsacore.Repository {
 		Name: options.Name,
-		Version: options.Version,
-		Lang: options.Lang,
 	})
 	if err != nil {
 		return err
@@ -86,7 +95,7 @@ type selectRepoCmd struct {
 	listReposCmd
 }
 type selectRepoOpt struct {
-	Server string `opt:"server|s,opt"`
+	Server string 	`opt:"server|s,opt"`
 	
 	Name string 	`arg:"1"`
 	Version string 	`arg:"2,opt"`
@@ -99,9 +108,8 @@ func (*selectRepoCmd) IsApplicable(ctx *fishly.Context) bool {
 func (*selectRepoCmd) NewOptions() interface{} {
 	return new(selectRepoOpt)
 }
-func (*selectRepoCmd) Complete(ctx *fishly.Context, option string) []string {
-	// TODO
-	return []string{}
+func (cmd *selectRepoCmd) Complete(ctx *fishly.Context, rq *fishly.CompleterRequest) {
+	cmd.listReposCmd.Complete(ctx, rq)
 }
 
 func (*selectRepoCmd) Execute(ctx *fishly.Context, rq *fishly.Request) error {

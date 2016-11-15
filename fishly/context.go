@@ -34,6 +34,10 @@ type ContextState struct {
 }
 
 type ExternalContext interface {
+	// Synchronizes state of the external context when internal 
+	// context is changed
+	Update(ctx* Context)
+	
 	// Cancels blocked operations which are currently running in
 	// corresponding request (cpu-greedy operations should check
 	// rq.Cancelled flag) 
@@ -45,6 +49,10 @@ type ExternalContext interface {
 type Context struct {
 	// External context used by program currently executing 
 	External ExternalContext
+	
+	// Current prompt set by external context (contains context-
+	// specific information such as formatted path)
+	Prompt string
 	
 	// Context states history. first is current state,
 	// last is "root" state
@@ -120,13 +128,12 @@ func (ctx *Context) tick() {
 		return
 	}
 	
-	// Updates prompt
-	prompt := ""
-	if len(state.Path) != 0 || len(state.Variables) != 0 {
-		prompt = ctx.cfg.PromptFormatter(ctx)
-	} 
+	// Notify external context about state change with a possibility 
+	// to update prompt 
+	ctx.External.Update(ctx)
 	
-	ctx.rl.SetPrompt(ctx.cfg.PromptProgram + " " + prompt + ctx.cfg.PromptSuffix)
+	// Updates prompt
+	ctx.rl.SetPrompt(ctx.cfg.PromptProgram + " " + ctx.Prompt + ctx.cfg.PromptSuffix)
 	
 	// Re-compute list of available commands
 	ctx.availableCommands = make(handlerTable)

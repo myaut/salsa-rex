@@ -219,8 +219,7 @@ func (*textFormatter) NewOptions() interface{} {
 	return new(textFormatterOpt)
 }
 
-func (*textFormatter) Complete(ctx *Context, option string) []string {
-	return []string{}
+func (*textFormatter) Complete(ctx *Context, rq *CompleterRequest) {
 }
 
 func (f *textFormatter) Run(ctx *Context, rq *IOFormatterRequest) {
@@ -318,6 +317,7 @@ func (rq *textFormatterRq) resetTermStyle() {
 
 func (rq *textFormatterRq) writeString(s string) {
 	if len(s) > 0 {
+		// TODO: support for hanging output
 		io.WriteString(rq.w, s)
 		rq.col += len(s)
 	}

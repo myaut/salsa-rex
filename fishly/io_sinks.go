@@ -41,8 +41,7 @@ func (*stdoutSink) NewOptions() interface{} {
 	return nil
 }
 
-func (*stdoutSink) Complete(ctx *Context, option string) []string {
-	return []string{}
+func (*stdoutSink) Complete(ctx *Context, rq *CompleterRequest)  {
 }
 
 func (*stdoutSink) NewSink(ctx *Context, rq *IOSinkRequest) (io.WriteCloser, error) {
@@ -83,8 +82,7 @@ func (*pagerSink) NewOptions() interface{} {
 	return nil
 }
 
-func (*pagerSink) Complete(ctx *Context, option string) []string {
-	return []string{}
+func (*pagerSink) Complete(ctx *Context, rq *CompleterRequest) {
 }
 
 func (*pagerSink) NewSink(ctx *Context, rq *IOSinkRequest) (io.WriteCloser, error) {

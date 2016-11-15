@@ -16,6 +16,10 @@ func NewSalsaContext() (*SalsaContext) {
 	return ctx
 }
 
+func (ctx *SalsaContext) Update(cliCtx *fishly.Context) {
+	// TODO: format prompt, update handle state
+}
+
 func (ctx *SalsaContext) Cancel(rq *fishly.Request) {
 	ctx.handle.Cancel(rq.Id)
 }

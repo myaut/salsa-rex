@@ -24,8 +24,8 @@ type Handler interface {
 	// NOTE: it is used to generate help, so no side effects please
 	NewOptions() interface{}
 	
-	// Returns auto-complete strings for arguments and options
-	Complete(ctx *Context, option string) []string
+	// Adds auto-complete strings for arguments and options into rq
+	Complete(ctx *Context, rq *CompleterRequest)
 }
 
 type handlerDescriptor struct {
@@ -250,6 +250,15 @@ func (od optionDescriptor) matchOption(opt string) bool {
 		}
 	}
 	return false
+}
+
+func (od optionDescriptor) findLongestAlias() (longestAlias string) { 
+	for _, alias := range od.options {
+		if len(alias) > len(longestAlias) {
+			longestAlias = alias
+		}
+	}
+	return 
 }
 
 func (ods optionDescriptorSlice) Len() int { 

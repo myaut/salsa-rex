@@ -53,9 +53,6 @@ type Config struct {
 	PromptProgram string
 	PromptSuffix string
 	
-	// Formatter for prompt middle part
-	PromptFormatter ContextPromptFormatter
-	
 	// Lists of supported/registered handlers. Handlers are stateless
 	// objects that handle requests and contexts
 	handlers []handlerDescriptor
@@ -115,6 +112,9 @@ func newContext(cfg *Config, extCtx ExternalContext) (*Context, error) {
 		HistoryLimit: cfg.UserConfig.HistoryLimit,
 		DisableAutoSaveHistory: cfg.UserConfig.DisableAutoSaveHistory,
 		VimMode: cfg.UserConfig.VimMode,
+		AutoComplete: &Completer{
+			ctx: ctx,
+		},
 	})
 	if err != nil {
 		return nil, err

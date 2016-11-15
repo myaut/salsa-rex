@@ -70,6 +70,9 @@ type cmdTokenParser struct {
 	allowOptions bool
 	argIndex int
 	
+	// Last expected delimiter (for autocompleters)
+	lastDelimiter rune
+	
 	// Buffer (input)
 	buf *bytes.Buffer
 }
@@ -84,17 +87,14 @@ func (ctx *Context) parseLine(line string) (*cmdTokenParser) {
 		hasMore: true,
 		tokenType: tCommand,
 		allowOptions: false,
-		argIndex: 0,
+		argIndex: 1,
 		buf: bytes.NewBufferString(line),
 	}
 	
 	for parser.hasMore {
-		whiteSpaceCount := parser.ignoreWhiteSpace()
+		parser.ignoreWhiteSpace()
 		if !parser.hasMore {
 			break
-		}
-		if whiteSpaceCount > 0 {
-			parser.argIndex += 1
 		}
 		
 		ch := parser.readRune(true)
@@ -118,7 +118,7 @@ func (ctx *Context) parseLine(line string) (*cmdTokenParser) {
 			case '\'':
 				token = parser.readToken(tSingleQuotedArgument, "'", false, false)
 			case '"':
-				token = parser.readToken(tDoubleQuotedArgument, `"`, false, false) 
+				token = parser.readToken(tDoubleQuotedArgument, `"`, false, false)
 			case '-':
 				if !parser.allowOptions {
 					if parser.unreadRune() {
@@ -156,7 +156,7 @@ func (ctx *Context) parseLine(line string) (*cmdTokenParser) {
 					break
 				}
 				
-				token = parser.readToken(parser.tokenType, shlexDelimiters, true, true)	
+				token = parser.readToken(parser.tokenType, shlexDelimiters, true, true)
 		}
 		
 		if parser.LastError != nil {
@@ -176,7 +176,13 @@ func (ctx *Context) parseLine(line string) (*cmdTokenParser) {
 				parser.allowOptions = false
 				fallthrough
 			case tRedirection:
-				parser.argIndex = 0
+				parser.argIndex = 1
+			case tRawArgument, tSingleQuotedArgument, tDoubleQuotedArgument:
+				// Find next token after argument. If they're merged, do not start 
+				// new argument (do not increase index)
+				if parser.ignoreWhiteSpace() > 0 {
+					parser.argIndex++
+				}
 		} 
 	}
 	
@@ -191,7 +197,10 @@ func (parser *cmdTokenParser) readToken(tokenType cmdTokenType, delimiters strin
 	token.tokenType = tokenType
 	token.token = parser.readUntil(delimiters, expectEOF, unreadRune)
 	token.argIndex = parser.argIndex
-	token.endPos = parser.Position - 1
+	token.endPos = parser.Position
+	if !unreadRune {
+		token.endPos--
+	}
 	
 	return token
 }
@@ -223,7 +232,10 @@ func (parser *cmdTokenParser) readUntil(delimiters string, expectEOF, unreadRune
 		ch := parser.readRune(expectEOF)
 		if parser.LastError != nil || !parser.hasMore {
 			// Even if we failed while parsing string, return what we managed 
-			// to parse (for auto completion) 
+			// to parse (for auto completion)
+			if len(delimiters) > 0 {
+				parser.lastDelimiter = []rune(delimiters)[0] 
+			}
 			break
 		}
 		

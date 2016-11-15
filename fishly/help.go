@@ -29,12 +29,18 @@ type helpRq struct {
 func (*helpCmd) IsApplicable(ctx *Context) bool {
 	return true
 }
+
 func (*helpCmd) NewOptions() interface{} {
 	return new(helpOpt)
 }
-func (*helpCmd) Complete(ctx *Context, option string) []string {
-	// TODO
-	return []string{}
+
+func (*helpCmd) Complete(ctx *Context, rq *CompleterRequest) {
+	switch rq.ArgIndex {
+		case 1:
+			for _, handler := range ctx.cfg.handlers {
+				rq.AddOption(handler.name)
+			}
+	}
 }
 
 func (cmd *helpCmd) Execute(ctx *Context, rq *Request) (err error) {
@@ -174,8 +180,13 @@ func (rq *helpRq) writeHandler(descriptor *handlerDescriptor) {
 					ioh.WriteString("alias", fmt.Sprintf("-%s", opt))					
 				}
 				
-				// aliases are sorted, so we use first (usually shortest) option 
-				optionPath = fmt.Sprintf("%s-%d", basePath, od.options[0])
+				optionPath = fmt.Sprintf("%s-%s", basePath, od.findLongestAlias())
+			}
+			
+			// Find help section string also considering inherited help
+			help := rq.ctx.help.Section(optionPath)
+			for help.HasKey("Inherit") {
+				help = rq.ctx.help.Section(help.Key("Inherit").String())
 			}
 			
 			if len(od.argName) > 0 {
@@ -196,8 +207,6 @@ func (rq *helpRq) writeHandler(descriptor *handlerDescriptor) {
 			}
 			
 			ioh.WriteString("defaultValue", fmt.Sprintf("%s", od.defaultVal))
-			
-			help := rq.ctx.help.Section(optionPath)
 			ioh.WriteString("help", help.Key("Text").String())
 			
 			ioh.EndObject()			

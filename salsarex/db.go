@@ -28,7 +28,7 @@ var db *arango.Database
 func InitializeDB(cfg *DBConfig) (err error) {
 	arango.SetDefaultDB(cfg.Database)
 	
-    dbSession, err = arango.Connect(cfg.URL, cfg.Username, cfg.Password, false)
+    dbSession, err = arango.Connect(cfg.URL, cfg.Username, cfg.Password, true)
     if err != nil {
     	return
     }

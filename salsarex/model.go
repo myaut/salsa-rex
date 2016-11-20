@@ -22,7 +22,7 @@ func NewRepository(repo *salsacore.Repository) *Repository {
 	obj := new(Repository)
 	obj.Repository = *repo
 	
-	h := sha1.Sum([]byte(fmt.Sprintf("%s:%s", repo.Name, repo.Version)))
+	h := sha1.Sum([]byte(fmt.Sprintf("%s%s%s", repo.Name, repo.Version, repo.Lang)))
 	obj.Key = hex.EncodeToString(h[:10])
 	
 	return obj

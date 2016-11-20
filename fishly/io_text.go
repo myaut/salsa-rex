@@ -253,14 +253,19 @@ func (f *textFormatter) Run(ctx *Context, rq *IOFormatterRequest) {
 		}
 		
 		// Not found style node, or it doesn't contain useful style -- no print
+		var styleNode *textStyleNode
 		if haveNode {
-			styleNode := styleIter.path[len(styleIter.path)-1]
-			frq.printToken(&token, styleNode)
+			styleNode = styleIter.path[len(styleIter.path)-1]
+			
+			// In some cases style won't be created (if we found intermediate node)
+			if styleNode.style != nil {
+				frq.printToken(&token, styleNode)
+			}
 		}
 		
 		if options.Dump {
 			frq.debugDump(rq.Output, &token, strconv.Quote(dumpBuffer.String()), 
-					strings.Join(stylePath.Path, "."), haveNode)
+					strings.Join(stylePath.Path, "."), styleNode)
 		}
 	}
 }
@@ -283,6 +288,11 @@ func (rq *textFormatterRq) printToken(token *Token, styleNode *textStyleNode) {
 	}
 	
 	if token.TokenType == Value {
+		// If we have specific value in token, customize style for it  
+		if valueNode, ok := styleNode.children["=" + token.Text]; ok {
+			style = valueNode.style
+		}
+		
 		rq.printValue(token, style, false)
 	}
 }
@@ -384,6 +394,9 @@ func (rq *textFormatterRq) printValue(token *Token, style *textStyle, forceBold 
 				case '^':
 					rightPad = padding / 2
 					leftPad = padding - padding/2
+				default:
+					// By default left-pad everything
+					rightPad = padding
 			}
 		}
 	}
@@ -416,6 +429,11 @@ func (rq *textFormatterRq) printHeader(header []Token, styleNode *textStyleNode)
 		// Find appropriate style and print header using same style as tokens use
 		if node, ok := styleNode.children[token.Tag]; ok {
 			if node.style != nil {
+				// Use header's width as column width if it is not enough
+				if len(token.Text) > node.style.Width {
+					node.style.Width = len(token.Text)
+				}
+				
 				rq.printValue(&token, node.style, true)
 				continue
 			}
@@ -427,11 +445,11 @@ func (rq *textFormatterRq) printHeader(header []Token, styleNode *textStyleNode)
 }
 
 func (rq *textFormatterRq) debugDump(w io.Writer, token *Token, 
-				text, stylePath string, haveNode bool) {
+				text, stylePath string, styleNode *textStyleNode) {
 	fmt.Fprintf(w, "%d tag:%-10s i:%d x:%d y:%d %s\n", token.TokenType, token.Tag,
 			rq.indent, rq.col, rq.row, text)
 	fmt.Fprintf(w, " -> %s \n", rq.tokenPath.GetPath())
-	fmt.Fprintf(w, " -> style: %s (%v)\n", stylePath, haveNode)
+	fmt.Fprintf(w, " -> style: %s (%v)\n", stylePath, styleNode.style)
 	
 	if len(rq.blocks) > 0 {
 		fmt.Fprintf(w, " -> blocks: %d ... %s\n", len(rq.blocks), rq.getCurrentBlock())

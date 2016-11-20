@@ -2,6 +2,11 @@ package salsacore
 
 // SALSA/REX core -- core types and functions for client and server
 
+import (
+	"strings"
+	"strconv"
+)
+
 // -----------------
 // TOKEN
 
@@ -72,4 +77,31 @@ type RepositoryFile struct {
 type TokenRef struct {
 	File string
 	Index int
+}
+
+// Compares versions and returns negative value if repo < other,
+// positive value repo > other or 0 if they are equal
+func (repo *Repository) SemverCompare(other Repository) int {
+	ver1 := strings.Split(repo.Version, ".")
+	ver2 := strings.Split(other.Version, ".")
+	
+    for i, v1 := range ver1 {
+        if i >= len(ver2) {
+            // ver1 longer, but all other items are the same
+            return 1;
+        }
+        
+        v1i, _ := strconv.Atoi(v1)
+        v2i, _ := strconv.Atoi(ver2[i])
+        
+        delta := v1i - v2i
+        if delta != 0 {
+            return delta
+        }
+    }
+    
+    if len(ver1) < len(ver2) {
+        return -1;
+    }
+    return 0;
 }

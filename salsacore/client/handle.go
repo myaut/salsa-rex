@@ -4,6 +4,7 @@ import (
 	"fmt"
 	
 	"io"
+	"time"
 	
 	"path/filepath"
 	
@@ -50,6 +51,7 @@ type HandleContext struct {
 	
 	srv *ServerConnection
 	serverIndex int
+	repoKey string
 }
 
 // Creates a new handle object
@@ -89,6 +91,25 @@ func (h *Handle) NewContext(id int) (*HandleContext, error) {
 	return h.NewServerContext(id, h.activeServer)
 }
 
+// Creates new repository context
+func (h *Handle) NewRepositoryContext(id int) (*HandleContext, error) {
+	hctx, err := h.NewServerContext(id, h.activeServer)
+	if err != nil {
+		return nil, err
+	}
+	
+	hctx.repoKey = h.repoKey
+	return hctx, nil
+}
+
+// See context.WithDeadline. If deadline is set to zero time, the call 
+// is ignored
+func (hctx *HandleContext) WithDeadline(deadline time.Time) {
+	if !deadline.IsZero() {
+		hctx.ctx, hctx.cancel = context.WithDeadline(hctx.ctx, deadline)
+	}
+}
+
 // Deferred operation which should be called to remove context from handle
 func (hctx *HandleContext) Done() {
 	delete(hctx.handle.contexts, hctx.id)
@@ -102,12 +123,16 @@ func (h *Handle) Cancel(id int) error {
 	return fmt.Errorf("No such context %d", id)
 }
 
-func (srv *ServerConnection) newRequest(method string, body io.Reader, path ...string) (*http.Request, error) {
-	url, err := url.Parse(srv.URL)
+func (hctx *HandleContext) newRequest(method string, body io.Reader, path ...string) (*http.Request, error) {
+	url, err := url.Parse(hctx.srv.URL)
 	if err != nil {
 		return nil, err
 	}
 	
+	// Build up URL
+	if len(hctx.repoKey) > 0 {
+		path = append([]string{"repo", hctx.repoKey}, path...)
+	}
 	url.Path = filepath.Join(append([]string{url.Path}, path...)...)
 	
 	rq, err := http.NewRequest(method, url.String(), body)
@@ -118,8 +143,8 @@ func (srv *ServerConnection) newRequest(method string, body io.Reader, path ...s
 	return rq, nil
 }
 
-func (srv *ServerConnection) newGETRequest(path ...string) (*http.Request, error) {
-	return srv.newRequest("GET", nil, path...)
+func (hctx *HandleContext) newGETRequest(path ...string) (*http.Request, error) {
+	return hctx.newRequest("GET", nil, path...)
 }
 
 func (hctx *HandleContext) doRequest(rq *http.Request) (*http.Response, error) {
@@ -136,7 +161,7 @@ func (hctx *HandleContext) doRequest(rq *http.Request) (*http.Response, error) {
 }
 
 // Performs request and decodes json from response after handling it
-func (hctx *HandleContext) doRequestDecodeJSON(rq *http.Request, value interface{}) (error) {
+func (hctx *HandleContext) doRequestDecodeJSON(rq *http.Request, value interface{}) error {
 	resp, err := hctx.doRequest(rq)
 	
 	if err != nil {
@@ -153,8 +178,8 @@ func (hctx *HandleContext) doRequestDecodeJSON(rq *http.Request, value interface
 	return json.NewDecoder(resp.Body).Decode(value)
 }
 
-func (hctx *HandleContext) doGETRequestDecodeJSON(value interface{}, path ...string) (error) {
-	rq, err := hctx.srv.newGETRequest(path...)
+func (hctx *HandleContext) doGETRequestDecodeJSON(value interface{}, path ...string) error {
+	rq, err := hctx.newGETRequest(path...)
 	if err != nil {
 		return err
 	}

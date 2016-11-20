@@ -9,7 +9,7 @@ type ServerRepository struct {
 	salsacore.Repository
 	
 	// Unique key assigned to this repository
-	Key string
+	Key string		`json:"_key"`
 	
 	// Name of the server providing this repository
 	Server string
@@ -34,14 +34,39 @@ func (hctx *HandleContext) FindRepositories(repo *salsacore.Repository) ([]Serve
 	}
 	
 	repos := make([]ServerRepository, 0)
-	err := hctx.doGETRequestDecodeJSON(repos, path...)
+	err := hctx.doGETRequestDecodeJSON(&repos, path...)
 	if err != nil {
 		return nil, err
 	}
 	
 	// Assign some internal fields and return value
 	for index, _ := range repos {
+		repos[index].Server = hctx.srv.Name
 		repos[index].serverIndex = hctx.serverIndex
 	}
 	return repos, nil
+}
+
+// Tries to get repository by using its key
+func (hctx *HandleContext) GetRepository(repoKey string) (ServerRepository, error) {
+	var repo ServerRepository
+	err := hctx.doGETRequestDecodeJSON(&repo, "repo", repoKey)
+	if err == nil {
+		repo.Server = hctx.srv.Name
+		repo.serverIndex = hctx.serverIndex
+	}
+	
+	return repo, err
+}
+
+func (h *Handle) ResetActiveRepository() {
+	h.activeServer = -1
+	h.repoKey = "" 
+}
+
+// Sets repo as active repository in this handle. NewRepositoryContext() 
+// will return contexts associated with this repository
+func (h *Handle) SelectActiveRepository(repo ServerRepository) {
+	h.activeServer = repo.serverIndex
+	h.repoKey = repo.Key
 }

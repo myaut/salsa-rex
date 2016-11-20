@@ -106,8 +106,12 @@ func (ctx *Context) processCommands(tokens []cmdToken) (*cmdTokenProcessor) {
 			case tCommand:
 				processor.newCommandRequest(token.token)	
 			case tOption:
+				if len(token.token) == 0 {
+					processor.LastError = fmt.Errorf("Empty option names are not allowed")
+					break
+				}
+			
 				processor.option = token.token
-				
 				if processor.handleOption(tOption, "") {
 					// Option is boolean and taken care of, break here. Otherwise
 					// next argument will be treated as option argument
@@ -284,6 +288,8 @@ func (processor *cmdTokenProcessor) commandRequestDone() {
 			break
 		}
 	}
+	
+	processor.optionDescriptors = nil
 }
 
 // Tries to handle builtin argument | value. Returns true if argument is taken care of or 

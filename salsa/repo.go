@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	
+	"time"
+	
 	"fishly"
 	
 	"salsacore"
@@ -30,7 +32,7 @@ func (*listReposCmd) NewOptions() interface{} {
 	return new(listReposOpt)
 }
 
-func (*listReposCmd) Complete(ctx *fishly.Context, rq *fishly.CompleterRequest) {
+func (cmd *listReposCmd) Complete(ctx *fishly.Context, rq *fishly.CompleterRequest) {
 	salsaCtx := ctx.External.(*SalsaContext)
 	
 	switch rq.ArgIndex {
@@ -41,38 +43,78 @@ func (*listReposCmd) Complete(ctx *fishly.Context, rq *fishly.CompleterRequest) 
 						rq.AddOption(srv.Name)
 					}
 			}
-		// case 1: -- repository names 
+		case 1:
+			repos, _ := cmd.findRepositories(salsaCtx, rq.Id, "", 
+				rq.GetDeadline(), &salsacore.Repository{})
+			for _, repo := range repos {
+				rq.AddOption(repo.Name)
+			}
 	}
 }
 
-func (cmd *listReposCmd) Execute(ctx *fishly.Context, rq *fishly.Request) error {
+func (cmd *listReposCmd) Execute(ctx *fishly.Context, rq *fishly.Request) (err error) {
 	salsaCtx := ctx.External.(*SalsaContext)
 	options := rq.Options.(*listReposOpt)
 	
-	_, err := cmd.findRepositories(salsaCtx, rq.Id, -1, &salsacore.Repository {
-		Name: options.Name,
-	})
+	repos, err := cmd.findRepositories(salsaCtx, rq.Id, options.Server, time.Time{},
+		&salsacore.Repository {
+			Name: options.Name,
+		})
 	if err != nil {
-		return err
+		return
 	}
 	
-	return fmt.Errorf("Not implemented")
+	ioh, err := rq.StartOutput(ctx, false)
+	if err != nil {
+		return
+	}
+	defer ioh.CloseOutput()
+	
+	ioh.StartArray("repositories")
+	for _, repo := range repos {
+		ioh.StartObject("repository")
+		
+		ioh.WriteString("server", repo.Server)
+		ioh.WriteString("key", repo.Key)
+		ioh.WriteString("name", repo.Name)
+		ioh.WriteString("version", repo.Version)
+		ioh.WriteString("lang", repo.Lang)
+		
+		ioh.EndObject()
+	}
+	ioh.EndArray()
+	
+	return
 }
 
-func (*listReposCmd) findRepositories(salsaCtx *SalsaContext, requestId, useServer int,
-			repo *salsacore.Repository) ([]client.ServerRepository, error) {
+func (*listReposCmd) findRepositories(salsaCtx *SalsaContext, requestId int,
+			serverName string, deadline time.Time, repo *salsacore.Repository) ([]client.ServerRepository, error) {
 	repos := make([]client.ServerRepository, 0)
+	foundServer := false
 	
 	for serverIndex, server := range salsaCtx.handle.Servers {
-		if useServer >= 0 && serverIndex != useServer {
+		if len(serverName) > 0 && server.Name != serverName {
+			if foundServer {
+				break
+			}
 			continue
+		} else {
+			foundServer = true
 		}
 		
 		hctx, err := salsaCtx.handle.NewServerContext(requestId, serverIndex)
 		if err != nil {
-			return nil, err
+			return repos, err
 		}
 		defer hctx.Done()
+		hctx.WithDeadline(deadline)
+		
+		// Try to use name as repository Key
+		srvRepo, err := hctx.GetRepository(repo.Name)
+		if err == nil {
+			repos = append(repos, srvRepo)
+			continue
+		}
 		
 		srvRepos, err := hctx.FindRepositories(repo) 
 		if err != nil {
@@ -83,6 +125,9 @@ func (*listReposCmd) findRepositories(salsaCtx *SalsaContext, requestId, useServ
 		repos = append(repos, srvRepos...)
 	}
 	
+	if !foundServer {
+		return nil, fmt.Errorf("Not found server '%s'", serverName)
+	}
 	return repos, nil
 }
 
@@ -112,8 +157,39 @@ func (cmd *selectRepoCmd) Complete(ctx *fishly.Context, rq *fishly.CompleterRequ
 	cmd.listReposCmd.Complete(ctx, rq)
 }
 
-func (*selectRepoCmd) Execute(ctx *fishly.Context, rq *fishly.Request) error {
-	// TODO
-	return fmt.Errorf("Not implemented")
+func (cmd *selectRepoCmd) Execute(ctx *fishly.Context, rq *fishly.Request) error {
+	salsaCtx := ctx.External.(*SalsaContext)
+	options := rq.Options.(*selectRepoOpt)
+	
+	repos, err := cmd.findRepositories(salsaCtx, rq.Id, options.Server, time.Time{}, 
+		&salsacore.Repository {
+			Name: options.Name,
+			Version: options.Version,
+			Lang: options.Lang,
+		})
+	if err != nil {
+		return err
+	}
+	
+	if len(repos) == 0 {
+		return fmt.Errorf("Repository '%s' is not found", options.Name)
+	}
+	
+	// Select repository with most recent version
+	repo := repos[0]
+	for _, other := range repos {
+		if repo.Lang != other.Lang {
+			return fmt.Errorf("Ambiguity: multiple repositories with different languages found")	
+		}
+		if repo.SemverCompare(other.Repository) > 0 {
+			repo = other
+		}
+	}
+	
+	state := ctx.PushState(true)
+	state.Path = []string{repo.Key, repo.Name, repo.Version, repo.Lang}
+	salsaCtx.handle.SelectActiveRepository(repo)
+	
+	return nil
 }
 

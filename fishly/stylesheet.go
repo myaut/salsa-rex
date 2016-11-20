@@ -173,5 +173,6 @@ func (sspath *StyleSheetPath) Update(iter StyleSheetIterator, path *TokenPath) b
 	}
 	
 	// If we didn't try ellipsis at last step, we got an actual node
+	// if it doesn't contain style, default-initialize it
 	return (ellipsis == nil)
 }

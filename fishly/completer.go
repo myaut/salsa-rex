@@ -2,6 +2,7 @@ package fishly
 
 import (
 	"io"
+	"time"
 	
 	"strings"
 	
@@ -24,9 +25,18 @@ type completerRq struct {
 }
 
 type CompleterRequest struct {
+	// Unique id of request
+	Id int
+	
+	// Argument index (if autocompleting argument, set to >=1, if 
+	// autocompleting option argument, set to 0) 
 	ArgIndex int
+	
+	// Longest option alias if auto-completing option
 	Option string
 	
+	// Known user input (not applicable for arguments consisting of
+	// multiple tokens)
 	Prefix string
 	
 	rq *completerRq
@@ -36,6 +46,11 @@ type CompleterRequest struct {
 // cutting suggested prefix)
 func (rq *CompleterRequest) AddOption(option string) {
 	rq.rq.tryAddOption(option)
+}
+
+// Returns deadline for auto-completer request
+func (rq *CompleterRequest) GetDeadline() time.Time {
+	return time.Now().Add(700 * time.Millisecond)
 }
 
 func (completer *Completer) Do(line []rune, pos int) (newLine [][]rune, length int) {
@@ -183,8 +198,11 @@ func (rq *completerRq) completeArgument(optionDescriptors []optionDescriptor) {
 	
 	crq := CompleterRequest {
 		rq: rq,
+		Id: rq.ctx.requestId,
 		Prefix: rq.prefix,
 	}
+	rq.ctx.requestId++
+	
 	if argIndex == -1 || argIndex == 0 {
 		// Auto-completing option argument, take last option (if 
 		// one specified)

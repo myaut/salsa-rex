@@ -23,10 +23,11 @@ type textStyle struct {
 	Indent int
 	
 	// left '<', right '>', or center '^'
-	Align rune
+	Align string
 	
 	// Delimiter used if value with same tag appears
 	Delimiter string
+	NoDelimit bool
 	
 	// Starting column of output
 	Column int
@@ -351,14 +352,13 @@ func (rq *textFormatterRq) printBlock(style *textStyle) {
 		
 	tokenPath := rq.tokenPath.GetPath()
 	if tokenPath != rq.getCurrentBlock() {
+		if len(rq.blocks) > 0 {
+			rq.newline()
+		}
 		rq.blocks = append(rq.blocks, tokenPath)
 	}
-	
-	if len(rq.lastTag) > 0 {
-		rq.newline()
-		rq.lastTag = ""
-	}
 
+	rq.lastTag = ""
 	rq.header = style.parseHeader()	
 }
 
@@ -376,7 +376,7 @@ func (rq *textFormatterRq) printValue(token *Token, style *textStyle, forceBold 
 	if style.NewLine {
 		rq.newline()
 	} else {
-		if len(rq.lastTag) > 0 {
+		if len(rq.lastTag) > 0 && len(token.Tag) > 0 && !style.NoDelimit {
 			rq.writeString(style.Delimiter)
 		}
 	}
@@ -387,11 +387,11 @@ func (rq *textFormatterRq) printValue(token *Token, style *textStyle, forceBold 
 		padding := style.Width - len(token.Text)
 		if padding > 0 {
 			switch style.Align {
-				case '<':
+				case "<":
 					rightPad = padding
-				case '>':
+				case ">":
 					leftPad = padding
-				case '^':
+				case "^":
 					rightPad = padding / 2
 					leftPad = padding - padding/2
 				default:
@@ -430,7 +430,7 @@ func (rq *textFormatterRq) printHeader(header []Token, styleNode *textStyleNode)
 		if node, ok := styleNode.children[token.Tag]; ok {
 			if node.style != nil {
 				// Use header's width as column width if it is not enough
-				if len(token.Text) > node.style.Width {
+				if node.style.Width == 0 {
 					node.style.Width = len(token.Text)
 				}
 				
@@ -445,11 +445,14 @@ func (rq *textFormatterRq) printHeader(header []Token, styleNode *textStyleNode)
 }
 
 func (rq *textFormatterRq) debugDump(w io.Writer, token *Token, 
-				text, stylePath string, styleNode *textStyleNode) {
-	fmt.Fprintf(w, "%d tag:%-10s i:%d x:%d y:%d %s\n", token.TokenType, token.Tag,
-			rq.indent, rq.col, rq.row, text)
+				text, stylePath string, styleNode *textStyleNode) {		
+	fmt.Fprintf(w, "%d tag:%-10s (last:%s) i:%d x:%d y:%d %s (%s)\n", token.TokenType, token.Tag,
+			rq.lastTag, rq.indent, rq.col, rq.row, text, token.Text)
 	fmt.Fprintf(w, " -> %s \n", rq.tokenPath.GetPath())
-	fmt.Fprintf(w, " -> style: %s (%v)\n", stylePath, styleNode.style)
+	
+	if styleNode != nil && styleNode.style != nil {
+		fmt.Fprintf(w, " -> style: %s (%v)\n", stylePath, styleNode.style)
+	}
 	
 	if len(rq.blocks) > 0 {
 		fmt.Fprintf(w, " -> blocks: %d ... %s\n", len(rq.blocks), rq.getCurrentBlock())

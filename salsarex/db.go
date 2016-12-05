@@ -25,10 +25,10 @@ type DBConfig struct {
 // A global pointer to a db session and instance
 var dbSession *arango.Session
 var db *arango.Database
-func InitializeDB(cfg *DBConfig) (err error) {
+func InitializeDB(cfg *DBConfig, logDb bool) (err error) {
 	arango.SetDefaultDB(cfg.Database)
 	
-    dbSession, err = arango.Connect(cfg.URL, cfg.Username, cfg.Password, true)
+    dbSession, err = arango.Connect(cfg.URL, cfg.Username, cfg.Password, logDb)
     if err != nil {
     	return
     }
@@ -53,7 +53,10 @@ func ResetDB() {
 	
 	// File 
 	db.CreateCollection(arango.NewCollectionOptions("File", false))
+	db.Col("File").CreateHash(false, "Repository")
+	db.Col("File").CreateHash(false, "Parent")
 	db.Col("File").CreateHash(false, "Path")
+	db.Col("File").CreateFullText(3, "Text")
 	
 	log.Println("Database was recreated")
 }

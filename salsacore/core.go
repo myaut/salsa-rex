@@ -67,11 +67,38 @@ type RepositoryProcessingStatus struct {
 	Indexers int32
 }
 
+type RepositoryFileType int
+const (
+	RFTOther = iota
+	RFTText
+	RFTSource
+	RFTDirectory
+)
+
+// This structure describes any FS node in the repository
+// including text files, directories, etc
 type RepositoryFile struct {
 	Repository string
-	Path string
 	
+	// Full path and basename of file
+	Path string
+	Name string
+	
+	// Key to parent fs node
+	Parent string
+	
+	// Type of file
+	FileType RepositoryFileType
+	FileSize int64
+	
+	// For text & source files -- contains file lines
+	Lines []string
+	
+	// For source files -- contains list of scanned tokens 
 	Tokens []Token 
+	
+	// Text for indexing
+	Text string
 }
 
 type TokenRef struct {
@@ -105,3 +132,5 @@ func (repo *Repository) SemverCompare(other Repository) int {
     }
     return 0;
 }
+
+

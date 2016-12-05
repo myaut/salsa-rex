@@ -56,6 +56,7 @@ type cmdTokenProcessor struct {
 	tokens []cmdToken
 	
 	// Public state
+	startIndex int
 	Index int
 	LastError error
 	
@@ -67,8 +68,8 @@ type cmdTokenProcessor struct {
 	argIndex int
 	providedOptions []string
 	
-	// Output data
-	Requests []*Request
+	// Requests stack (for conditional and loop statements)
+	requests []*Request
 }
 
 // Unlike regular commands, builtins don't have implementation as Command  
@@ -87,15 +88,23 @@ var builtins = []string{
 	"_reload",
 }
 
-// Tries to process command tokens and returns array of requests or 
-// error coupled with token where error has happened in cmdTokenProcessor
-func (ctx *Context) processCommands(tokens []cmdToken) (*cmdTokenProcessor) {
+func (ctx *Context) newCommandProcessor(tokens []cmdToken) (*cmdTokenProcessor) {
 	processor := new(cmdTokenProcessor)
 	
-	processor.Requests = make([]*Request, 0)
+	processor.requests = make([]*Request, 0)
 	processor.ctx = ctx
 	processor.tokens = tokens
 	
+	return processor
+}
+
+// Tries to process command tokens and returns next command request or nil
+// if no more command requests can be processed
+func (processor *cmdTokenProcessor) nextCommand() *Request {
+	processor.startIndex = processor.Index
+	processor.rq = nil
+	
+	loop:
 	for {
 		token := processor.nextToken()
 		if token == nil {
@@ -106,9 +115,9 @@ func (ctx *Context) processCommands(tokens []cmdToken) (*cmdTokenProcessor) {
 			case tCommand:
 				processor.newCommandRequest(token.token)	
 			case tOption:
-				if len(token.token) == 0 {
+				if len(token.token) == 0 && processor.rq.command != nil {
 					processor.LastError = fmt.Errorf("Empty option names are not allowed")
-					break
+					break loop
 				}
 			
 				processor.option = token.token
@@ -123,13 +132,12 @@ func (ctx *Context) processCommands(tokens []cmdToken) (*cmdTokenProcessor) {
 				
 				value := processor.assembleArgument(token.argIndex)
 				if processor.LastError != nil {
-					break
+					break loop
 				}
 				
 				processor.handleOption(tRawArgument, value)
 			case tCommandSeparator:
-				processor.commandRequestDone()
-				processor.rq = nil
+				break loop
 			case tRedirection:
 				processor.commandRequestDone()
 				processor.newRedirectRequest(token.token)
@@ -145,8 +153,7 @@ func (ctx *Context) processCommands(tokens []cmdToken) (*cmdTokenProcessor) {
 	if processor.LastError == nil {
 		processor.commandRequestDone()
 	}
-	
-	return processor
+	return processor.rq
 }
 
 // Tries to get next token from token sequence. If fails to, returns nil
@@ -212,7 +219,7 @@ func (processor *cmdTokenProcessor) newCommandRequest(name string) {
 		}
 	}
 	
-	processor.Requests = append(processor.Requests, rq)
+	processor.requests = append(processor.requests, rq)
 	processor.rq = rq
 	processor.resetCommandState()
 }
@@ -295,26 +302,38 @@ func (processor *cmdTokenProcessor) commandRequestDone() {
 // Tries to handle builtin argument | value. Returns true if argument is taken care of or 
 // last error is set. Return false if request is (promoted/already) a full command request
 func (processor *cmdTokenProcessor) handleBuiltinArgument(tokenType cmdTokenType, value string) bool {
-	if tokenType != tRawArgument {
-		processor.LastError = fmt.Errorf("%s builtin doesn't support '%s' tokens", 
-			processor.rq.commandName, tokenTypeStrings[tokenType])
-		return true
-	}
 	if processor.rq.Options != nil {
 		processor.LastError = fmt.Errorf("%s builtin option already specified", 
 			processor.rq.commandName)
 		return true
 	}
-	
 	switch processor.rq.commandName {
 		case "cd":
-			if value != "-" {
+			if tokenType != tOption {
 				// This is not builtin variant of "cd", try to promote
 				// it to the full-fledged cd
 				return !processor.setupCommandRequest(processor.rq)
 			}
 			
-			processor.rq.Options = value
+			if len(processor.option) == 0 {
+				processor.rq.Options = -1
+			} else {
+				steps, err := strconv.Atoi(processor.option)
+				if err != nil {
+					return !processor.setupCommandRequest(processor.rq)
+				}
+				
+				processor.rq.Options = -steps
+			}
+			return true
+	}
+	
+	if tokenType != tRawArgument {
+		processor.LastError = fmt.Errorf("%s builtin doesn't support '%s' tokens", 
+			processor.rq.commandName, tokenTypeStrings[tokenType])
+		return true
+	}
+	switch processor.rq.commandName {
 		case "source":
 			// TODO: load file and push it as subrequests
 			return true
@@ -330,7 +349,6 @@ func (processor *cmdTokenProcessor) handleBuiltinArgument(tokenType cmdTokenType
 			processor.LastError = fmt.Errorf("%s builtin doesn't support any arguments", 
 					processor.rq.commandName, tokenTypeStrings[tokenType])
 	}
-	
 	
 	return true
 }
@@ -523,3 +541,44 @@ func (processor *cmdTokenProcessor) newRedirectRequest(name string) {
 			rq.addIOPipeRequest(pipe)
 	}
 }
+
+// Re-assembles line from tokens for specific request. Returns assembled line
+// and position of last processed token
+func (processor *cmdTokenProcessor) assembleLine() (string, int) {
+	if len(processor.tokens) == 0 {
+		return "", 0
+	}
+	
+	basePos := processor.tokens[processor.startIndex].startPos
+	buf := bytes.NewBuffer([]byte{})
+	
+	for tokenIndex := processor.startIndex; tokenIndex < processor.Index ; tokenIndex++ {
+		token := processor.tokens[tokenIndex]
+		
+		prefix := '\000'
+		switch token.tokenType {
+			case tOption:
+				prefix = '-'
+			case tRedirection:
+				prefix = '|'
+			case tFileRedirection:
+				prefix = '>'
+		}
+		
+		wsLen := token.startPos - basePos
+		if prefix != '\000' {
+			buf.WriteString(strings.Repeat(" ", wsLen - 1))
+			buf.WriteRune(prefix)	
+		} else {
+			buf.WriteString(strings.Repeat(" ", wsLen))
+		}
+		buf.WriteString(token.token)
+		basePos = token.endPos
+	}
+	
+	if processor.Index < len(processor.tokens) {
+		buf.WriteString(" ...")
+	}
+	
+	return buf.String(), processor.tokens[processor.Index-1].startPos
+} 

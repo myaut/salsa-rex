@@ -156,6 +156,9 @@ type Lexer struct {
 	// scanner.EOF 
 	lastRune rune
 	
+	// Number of runes going prior to token text
+	initialRunes int
+	
 	// Language definitions
 	language
 }
@@ -184,7 +187,10 @@ func (l *Lexer) produce(tokenType salsacore.TokenType, token string) salsacore.T
 		Type: tokenType,
 		Text: token,
 		Line: l.Pos().Line,
-		Column: l.Pos().Column,
+		
+		// Column points to the first character in token (starting at 1) on contrary
+		// to what Scanner returns (first character past token)
+		Column: l.Pos().Column - len(token) - l.initialRunes,
 	}
 }
 
@@ -198,6 +204,7 @@ func (l *Lexer) produceSymbol(token string) salsacore.Token {
 
 func (l *Lexer) LexScan() salsacore.Token {
 	var r rune
+	l.initialRunes = 0
 	
 	if l.lastRune != scanner.EOF {
 		r, l.lastRune = l.lastRune, scanner.EOF
@@ -277,6 +284,7 @@ func (l *Lexer) scanTwoRuneOperator(r rune) salsacore.Token {
 
 func (l *Lexer) scanPPInclude() salsacore.Token {
 	r := l.Scan()
+	l.initialRunes = 1
 				
 	if r == scanner.String {
 		return l.produce(salsacore.PPInclude, strings.Trim(l.TokenText(), `"`))

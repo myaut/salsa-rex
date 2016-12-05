@@ -25,6 +25,7 @@ func main() {
 	// or located in ~/.salsarc
 	configPath := flag.String("config", handleHome("~/.salsarc"), "path to client.ini")
 	autoExec := flag.String("exec", "", "command to be automatically executed")
+	initContext := flag.String("ctx", "", "initial context state")
 	flag.Parse()
 	
 	if _, err := os.Stat(*configPath); os.IsNotExist(err) {
@@ -51,6 +52,7 @@ func main() {
 	}
 	
 	cliCfg.UserConfig.AutoExec = *autoExec
+	cliCfg.UserConfig.InitContextURL = *initContext
 	
 	// Fill in commands list and run
 	registerCLICommands(&cliCfg)
@@ -111,6 +113,9 @@ func loadServers(cfg *ini.File, ctx *SalsaContext) error {
 func registerCLICommands(cliCfg *fishly.Config) {
 	cliCfg.RegisterCommand(new(listReposCmd), "repository", "ls")
 	cliCfg.RegisterCommand(new(selectRepoCmd), "repository", "select")
+	cliCfg.RegisterCommand(new(listFilesCmd), "repofs", "ls")
+	cliCfg.RegisterCommand(new(changePathCmd), "repofs", "cd")
+	cliCfg.RegisterCommand(new(printFileCmd), "repofs", "cat")
 }
 
 func handleHome(path string) string {

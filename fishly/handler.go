@@ -58,7 +58,7 @@ type optionDescriptor struct {
 	
 	// Some helpers for help scrapped from structure
 	argName string
-	defaultVal string
+	defaultVal reflect.Value
 }
 type optionDescriptorSlice []optionDescriptor
 
@@ -113,6 +113,7 @@ func (cfg *Config) RegisterIOSink(sink IOSink, name string) {
 // Registers handlers supplied by fishly
 func (cfg *Config) registerBuiltinHandlers() {
 	cfg.RegisterCommand(new(helpCmd), "common", "help")
+	cfg.RegisterCommand(new(historyCmd), "common", "history")
 	
 	stdout := new(stdoutSink)
 	cfg.RegisterIOSink(stdout, "stdout")
@@ -229,7 +230,7 @@ func generateOptionDescriptors(options interface{}) []optionDescriptor {
 			}
 		}
 		
-		descriptor.defaultVal = optionsVal.Field(fieldIdx).String()
+		descriptor.defaultVal = optionsVal.Field(fieldIdx)
 		
 		descriptors = append(descriptors, *descriptor)
 	}

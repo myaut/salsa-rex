@@ -22,9 +22,11 @@ import (
 	_ "net/http/pprof"
 )
 
+var configPath *string = flag.String("config", "", "path to config.ini")
+var backend *bool = flag.Bool("backend", false, "start as front-end server")
+var logDb *bool = flag.Bool("log-db", false, "log database operations")
+
 func main() {
-	configPath := flag.String("config", "", "path to config.ini")
-	backend := flag.Bool("backend", false, "start as front-end server")
 	flag.Parse()
 	
 	if len(*configPath) == 0 {
@@ -50,7 +52,7 @@ func main() {
 	
 	registerIndexers()
 	
-	log.Fatalln(startServer(cfg, *backend))
+	log.Fatalln(startServer(cfg))
 }
  
 func initializeDatabase(cfg *ini.File) (err error) {
@@ -63,10 +65,10 @@ func initializeDatabase(cfg *ini.File) (err error) {
 	
 	log.Printf("Connecting to arango database at %s...", dbCfg.URL)
 	
-	return salsarex.InitializeDB(&dbCfg)
+	return salsarex.InitializeDB(&dbCfg, *logDb)
 }
 
-func startServer(cfg *ini.File, backend bool) (err error) {
+func startServer(cfg *ini.File) (err error) {
 	srvCfg := struct {
 		Hostname string
 		Port int
@@ -105,7 +107,7 @@ func startServer(cfg *ini.File, backend bool) (err error) {
 	// setup server routing & start
 	addr := fmt.Sprintf("%s:%d", srvCfg.Hostname, srvCfg.Port)
 	
-	if backend {
+	if *backend {
 		// create special multiplexer for /api on backend
 		createBackendAPIHandlers(srvCfg.APIRoot, server)
 		

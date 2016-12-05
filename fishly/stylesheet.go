@@ -50,11 +50,28 @@ func LoadStyleSheet(files []string, rootNode StyleSheetNode) (error) {
 		return err
 	}
 	
+	var sharedSection *ini.Section
+	var sharedBlock, lastBlock, lastBlockTag string 
+	
 	for _, section := range styleMap.Sections() {
-		// Iteratively create node corresponding to this section's path
 		sspath := new(StyleSheetPath)
-		sspath.Parse(section.Name())
+		ssname := strings.Replace(section.Name(), lastBlockTag, lastBlock, -1)
+		if strings.HasSuffix(ssname, ".*") {
+			sharedSection = section
+			sharedBlock = ssname[:len(ssname)-2]
+			continue			
+		}
 		
+		sspath.Parse(ssname)
+		
+		// Save last block path child nodes  
+		if section.HasKey("BlockTag") {
+			// TODO: shouldn't we have map here?
+			lastBlock = ssname
+			lastBlockTag = "@" + section.Key("BlockTag").String()
+		}
+		
+		// Iteratively create node corresponding to this section's path
 		node := rootNode
 		for _, component := range sspath.Path {
 			newNode := node.GetChild(component)
@@ -64,7 +81,11 @@ func LoadStyleSheet(files []string, rootNode StyleSheetNode) (error) {
 			node = newNode 
 		}
 		
-		section.MapTo(node.CreateStyle())
+		style := node.CreateStyle()
+		if sharedSection != nil && strings.HasPrefix(ssname, sharedBlock) {
+			sharedSection.MapTo(style)
+		}
+		section.MapTo(style)
 		
 		// Create empty subnodes with empty style
 		if section.HasKey("SubNodes") {

@@ -78,6 +78,7 @@ func (cmd *helpCmd) Execute(ctx *Context, rq *Request) (err error) {
 		ioh: ioh,
 	}
 	
+	ioh.StartArray("handlerGroups")
 	if descriptor != nil {
 		hrq.verbose = true
 		hrq.writeHandler(descriptor)
@@ -90,15 +91,16 @@ func (cmd *helpCmd) Execute(ctx *Context, rq *Request) (err error) {
 			hrq.writeHandler(descriptor)
 		}
 		for _, builtin := range builtins {
-			if strings.HasPrefix(builtin, "-") {
+			if strings.HasPrefix(builtin, "_") {
 				continue
 			}
 			
 			hrq.writeBuiltin(builtin)
 		}
 	}
-	
 	hrq.groupDone()
+	ioh.EndArray()
+	
 	return
 }
 
@@ -206,7 +208,22 @@ func (rq *helpRq) writeHandler(descriptor *handlerDescriptor) {
 				ioh.WriteFormattedValue("optional", "(opt)", true)
 			}
 			
-			ioh.WriteString("defaultValue", fmt.Sprintf("%s", od.defaultVal))
+			// Print default value but only if it is different than default initialization
+			printDefaultVal := true
+			switch od.kind {
+				case reflect.Slice, reflect.Array:
+					printDefaultVal = (od.defaultVal.Len() > 0)
+				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+					printDefaultVal = (od.defaultVal.Int() != 0)
+				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+					printDefaultVal = (od.defaultVal.Uint() > 0)
+				case reflect.Bool:
+					printDefaultVal = od.defaultVal.Bool()
+			}
+			if printDefaultVal {
+				ioh.WriteRawValue("defaultValue", od.defaultVal)
+			}
+			
 			ioh.WriteString("help", help.Key("Text").String())
 			
 			ioh.EndObject()			

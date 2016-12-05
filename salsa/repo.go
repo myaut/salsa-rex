@@ -6,11 +6,28 @@ import (
 	
 	"time"
 	
+	"strings"
+	"path/filepath"
+	
 	"fishly"
 	
 	"salsacore"
 	"salsacore/client"
 )
+
+var tokenTags = []string{
+	"eof",
+	"ident",
+	"keyword",
+	"int",
+	"float",
+	"char",
+	"string",
+	"symbol",
+	"ppinclude",
+	"ppbegin",
+	"ppend",
+}
 
 // 
 // ls command for repositories -- shows list of repositories
@@ -187,9 +204,328 @@ func (cmd *selectRepoCmd) Execute(ctx *fishly.Context, rq *fishly.Request) error
 	}
 	
 	state := ctx.PushState(true)
-	state.Path = []string{repo.Key, repo.Name, repo.Version, repo.Lang}
+	state.Path = []string{repo.Server, repo.Key, repo.Name, 
+		repo.Version, repo.Lang}
 	salsaCtx.handle.SelectActiveRepository(repo)
 	
 	return nil
 }
 
+
+// 
+// ls command for files -- shows list of files
+// 
+
+type listFilesCmd struct {
+}
+type listFilesOpt struct {
+	Long bool `opt:"l|long,opt"`
+	
+	Paths []string 	`arg:"1,opt"`
+}
+
+func (*listFilesCmd) IsApplicable(ctx *fishly.Context) bool {
+	return len(ctx.GetCurrentState().Path) >= lengthPathRepo
+}
+
+func (*listFilesCmd) NewOptions() interface{} {
+	return new(listFilesOpt)
+}
+
+func (cmd *listFilesCmd) completeImpl(ctx *fishly.Context, 
+				rq *fishly.CompleterRequest, checker func(fileType salsacore.RepositoryFileType)bool) {
+	salsaCtx := ctx.External.(*SalsaContext)
+	
+	path := rq.Prefix
+	if !strings.HasSuffix(path, "/") {
+		path += "*"
+	}
+	isAbs := strings.HasPrefix(path, "/")
+	wd := cmd.getWorkingDirectory(ctx)
+	path = cmd.absPath(path, wd)
+	
+	hctx, err := salsaCtx.handle.NewRepositoryContext(rq.Id)
+	if err != nil {
+		return
+	}
+	hctx.WithDeadline(rq.GetDeadline())
+	
+	files, err := hctx.GetDirectoryEntries(path)
+	if err != nil {
+		return
+	}
+	for _, file := range files {
+		if !checker(file.FileType) {
+			continue
+		}
+		
+		// Depending on which type of arguments we auto-complete (relative vs. absolute)
+		// we should keep prefix suggestion or not
+		if isAbs {
+			rq.AddOption(file.Path)
+		} else {
+			rq.AddOption(file.Name)
+		}		
+	}
+}
+
+func (cmd *listFilesCmd) Complete(ctx *fishly.Context, rq *fishly.CompleterRequest) {
+	cmd.completeImpl(ctx, rq, func(fileType salsacore.RepositoryFileType) bool {
+			return true
+		})
+}
+
+func (*listFilesCmd) getWorkingDirectory(ctx *fishly.Context) string {
+	return filepath.Join(ctx.GetCurrentState().Path[lengthPathRepo:]...)
+}
+
+func (*listFilesCmd) absPath(path string, wd string) string {
+	if filepath.HasPrefix(path, "/") {
+		return strings.TrimLeft(path, "/")
+	}
+	
+	return filepath.Join(wd, path)	
+}
+
+func (cmd *listFilesCmd) Execute(ctx *fishly.Context, rq *fishly.Request) (err error) {
+	salsaCtx := ctx.External.(*SalsaContext)
+	options := rq.Options.(*listFilesOpt)
+	
+	// If no arguments are specified, list contents of current directory. 
+	// If there are arguments, compute relative paths 
+	wd := cmd.getWorkingDirectory(ctx)
+	if len(options.Paths) == 0 {
+		options.Paths = []string{""}
+	}
+	for index, path := range options.Paths {
+		options.Paths[index] = cmd.absPath(path, wd)
+	}
+	
+	// Get all files from server
+	hctx, err := salsaCtx.handle.NewRepositoryContext(rq.Id)
+	if err != nil {
+		return err
+	}
+	
+	allFiles := make(map[string][]salsacore.RepositoryFile, 0)
+	for _, path := range options.Paths {
+		allFiles[path], err = hctx.GetDirectoryEntries(path)
+		if err != nil || rq.Cancelled {
+			return err
+		}
+	}
+	
+	ioh, err := rq.StartOutput(ctx, false)
+	if err != nil {
+		return
+	}
+	defer ioh.CloseOutput()
+	
+	ioh.StartArray("fileLists")
+	for rootPath, files := range allFiles {
+		ioh.StartObject("fileList")
+		
+		if len(rootPath) != 0 { 	
+			ioh.WriteFormattedValue("path", fmt.Sprintf("%s contents:", rootPath), rootPath)
+		}
+		
+		ioh.StartArray("files")
+		for _, file := range files {
+			typeName, fileName := "file", file.Name
+			switch file.FileType {
+				case salsacore.RFTDirectory:
+					typeName, fileName = "dir", file.Name + "/"
+				case salsacore.RFTText:
+					typeName = "text"
+				case salsacore.RFTSource:
+					typeName = "source" 	
+			}
+			
+			if options.Long {
+				ioh.StartObject("entry")
+				ioh.WriteRawValue("size", file.FileSize)
+				ioh.WriteString("type", typeName)
+				ioh.WriteString("name", file.Name)
+				ioh.EndObject()
+			} else {
+				ioh.WriteString(typeName, fileName)
+			}
+		}
+		ioh.EndObject()
+		ioh.EndArray()
+	}
+	ioh.EndArray()
+	
+	return
+}
+
+//
+// 'cd' command in repository virtual file system. Overrides "cd" builtin
+// 
+
+type changePathCmd struct {
+	listFilesCmd
+}
+type changePathOpt struct {
+	Path string 	`arg:"1"`
+}
+
+func (*changePathCmd) IsApplicable(ctx *fishly.Context) bool {
+	return len(ctx.GetCurrentState().Path) >= lengthPathRepo
+}
+
+func (*changePathCmd) NewOptions() interface{} {
+	return new(changePathOpt)
+}
+
+func (cmd *changePathCmd) Complete(ctx *fishly.Context, rq *fishly.CompleterRequest) {
+	cmd.listFilesCmd.completeImpl(ctx, rq, func(fileType salsacore.RepositoryFileType) bool {
+			return fileType == salsacore.RFTDirectory
+		})
+}
+
+func (cmd *changePathCmd) Execute(ctx *fishly.Context, rq *fishly.Request) (err error) {
+	salsaCtx := ctx.External.(*SalsaContext)
+	options := rq.Options.(*changePathOpt)
+	 
+	path := cmd.listFilesCmd.absPath(options.Path, 
+		cmd.listFilesCmd.getWorkingDirectory(ctx))
+
+	// Special case for paths that lead to root
+	if path == "." {
+		state := ctx.PushState(false)
+		state.Path = state.Path[:lengthPathRepo]
+		
+		return 
+	}
+
+	// In other cases -- find corresponding fs node
+	hctx, err := salsaCtx.handle.NewRepositoryContext(rq.Id)
+	if err != nil {
+		return err
+	}
+	dir, err := hctx.GetFileContents(path)
+	if err != nil || rq.Cancelled {
+		return err
+	}
+	if dir.FileType != salsacore.RFTDirectory {
+		return fmt.Errorf("'%s' is not a directory", dir.Path)
+	}
+	
+	// Update context state
+	state := ctx.PushState(false)
+	state.Path = append(state.Path[:lengthPathRepo], 
+			strings.Split(strings.TrimLeft(dir.Path, fishly.PathSeparator), 
+				fishly.PathSeparator)...)
+	
+	return
+}
+
+
+// 
+// 'cat' command for files -- prints file contents 
+// 
+
+type printFileCmd struct {
+	listFilesCmd
+}
+type printFileOpt struct {
+	LineNumbers bool `opt:"n|numbers,opt"`
+	
+	Path string `arg:"1"`
+}
+
+func (*printFileCmd) IsApplicable(ctx *fishly.Context) bool {
+	return len(ctx.GetCurrentState().Path) >= lengthPathRepo
+}
+
+func (*printFileCmd) NewOptions() interface{} {
+	return new(printFileOpt)
+}
+
+func (cmd *printFileCmd) Complete(ctx *fishly.Context, rq *fishly.CompleterRequest) {
+	cmd.listFilesCmd.completeImpl(ctx, rq, func(fileType salsacore.RepositoryFileType) bool {
+			return fileType != salsacore.RFTDirectory
+		})
+}
+
+func (cmd *printFileCmd) Execute(ctx *fishly.Context, rq *fishly.Request) (err error) {
+	salsaCtx := ctx.External.(*SalsaContext)
+	options := rq.Options.(*printFileOpt)
+	
+	path := cmd.listFilesCmd.absPath(options.Path, 
+		cmd.listFilesCmd.getWorkingDirectory(ctx))
+	
+	hctx, err := salsaCtx.handle.NewRepositoryContext(rq.Id)
+	if err != nil {
+		return err
+	}
+	text, err := hctx.GetFileContents(path)
+	if err != nil || rq.Cancelled {
+		return err
+	}
+	if text.FileType != salsacore.RFTText && text.FileType != salsacore.RFTSource {
+		return fmt.Errorf("'%s' is not a text file", text.Path)
+	}
+	
+	ioh, err := rq.StartOutput(ctx, true)
+	if err != nil {
+		return
+	}
+	defer ioh.CloseOutput()
+	
+	// Since tokens and lines array ordered by line number, we iterate 
+	// them simultaneously. 
+	tokenIndex := 0
+	
+	ioh.StartArray("lines")
+	for lineno, line := range text.Lines {
+		// Use line numbering from 1 (token columns also do that)
+		lineno++
+		ioh.StartArray("line")
+		if options.LineNumbers {
+			ioh.WriteRawValue("lineno", lineno)	
+		}
+		
+		// Print line, but print tokens separately, with tags
+		if tokenIndex >= len(text.Tokens) || text.Tokens[tokenIndex].Line > lineno {
+			ioh.WriteText(line)
+		} else {
+			column := 0
+			for column < len(line) && tokenIndex < len(text.Tokens) {
+				token := text.Tokens[tokenIndex]
+				if token.Line > lineno {
+					break
+				}
+				
+				tokenColumn := token.Column - 1
+				if tokenColumn >= len(line) {
+					// Impossible condition -- lexer error, rewind until last token
+					ioh.WriteString("error", fmt.Sprintf("token outside line: %d >= %d", 
+							token.Column, len(line)))
+					tokenIndex = len(text.Tokens)
+					break
+				}
+				if tokenColumn > column {
+					ioh.WriteText(line[column:tokenColumn])
+				}
+				
+				// Write token (but we want to support syntax highlighting here) 
+				ioh.WriteString(tokenTags[token.Type], token.Text)
+				column = tokenColumn + len(token.Text)
+				// ioh.WriteRawValue("_col", column)
+				tokenIndex++
+			}
+			
+			// Write tail of line (if there is something to write)
+			if len(line) > column {
+				ioh.WriteText(line[column:])
+			}
+		}
+		
+		ioh.EndArray()
+	}
+	ioh.EndArray()
+	
+	return
+}

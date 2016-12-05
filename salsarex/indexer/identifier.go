@@ -120,7 +120,7 @@ func identifierIndexCollector(indexer *IdentifierIndexer) {
 			break
 		}
 		
-		identifierKey := indexer.repo.CreateObjectKey(msg.identifier)	
+		identifierKey := indexer.repo.GetSubKey(msg.identifier)	
 		identifier, ok := identifiers[identifierKey]
 		
 		// Get identifier from on-stack cache or create new one  

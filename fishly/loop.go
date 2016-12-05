@@ -9,6 +9,7 @@ import (
 	"os/signal"
 		
 	"strings"
+	"net/url"
 	
 	"github.com/go-ini/ini"	
 	
@@ -41,6 +42,9 @@ type UserConfig struct {
 	
 	// StyleSheet files used for formatted text
 	StyleSheet []string
+	
+	// URL used as initial context state
+	InitContextURL string
 }
 
 type Config struct {
@@ -73,10 +77,12 @@ type Config struct {
 func (cfg *Config) Run(extCtx ExternalContext) int {
 	// runs main command loop
 	ctx, err := newContext(cfg, extCtx)
+	if ctx.rl != nil {
+		defer ctx.rl.Close()	
+	}
 	if err != nil {
 		log.Fatalln(err)
 	}
-	defer ctx.rl.Close()
 	
 	log.Println(ctx.cfg.MOTD)
 	ctx.runAutoExec()
@@ -90,7 +96,7 @@ func (cfg *Config) Run(extCtx ExternalContext) int {
 		}
 		
 		ctx.parseRequests(line)
-		for ctx.running && ctx.requestIndex < len(ctx.requests) {
+		for ctx.running && ctx.hasMoreRequests {
 			ctx.processRequest()
 		}
 		
@@ -124,15 +130,24 @@ func newContext(cfg *Config, extCtx ExternalContext) (*Context, error) {
 	ctx.running = true
 	ctx.cfg.registerBuiltinHandlers()
 	
+	// Some redirections 
+	log.SetOutput(ctx.rl.Stderr())
+	
 	// Create first root state
 	ctx.states = make([]ContextState, 0, 1)
 	ctx.PushState(true)
 	
-	// Initialize context
+	if len(cfg.UserConfig.InitContextURL) > 0 {
+		ctxUrl, err := url.Parse(cfg.UserConfig.InitContextURL) 
+		if err != nil {
+			return nil, err
+		}
+		err = ctx.PushStateFromURL(ctxUrl, true)
+		if err != nil {
+			return nil, err
+		}
+	}
 	ctx.tick()
-	
-	// Some redirections 
-	log.SetOutput(ctx.rl.Stderr())
 	
 	return ctx, nil
 }
@@ -147,42 +162,42 @@ func (ctx *Context) loadHelp() (err error) {
 	return 
 }
 
-func (ctx *Context) parseRequests(line string) {
-	ctx.requestIndex = 0
-	
+func (ctx *Context) parseRequests(line string) bool {
 	if len(line) == 0 {
-		ctx.requests = []*Request{}
-		return
+		return true
 	}
 	
 	parser := ctx.parseLine(line)
 	if parser.LastError != nil {
 		ctx.dumpLastError(parser.Position, parser.Position, line, "Parser", parser.LastError)
-		ctx.requests = nil
-		return
+		return false
 	}
 	
 	// dumpTokens(parser.Tokens)
 	
-	processor := ctx.processCommands(parser.Tokens)
-	if processor.LastError != nil {
-		token := &parser.Tokens[processor.Index-1]
-		ctx.dumpLastError(token.startPos, token.endPos, line, "Syntax", processor.LastError)
-		ctx.requests = nil
-		return
-	}
-	
-	// TODO: support for hanging requests (i.e. \, unclosed if/for) -- should 
-	// enter multiline input
-	
-	ctx.requests = processor.Requests
+	ctx.cmdProcessor = ctx.newCommandProcessor(parser.Tokens)
+	ctx.hasMoreRequests = true
+	return true
 }
 
 func (ctx *Context) processRequest() (err error) {
-	rq := ctx.requests[ctx.requestIndex]
-	rq.Id = ctx.requestId
+	processor := ctx.cmdProcessor
+	rq := processor.nextCommand()
+	if processor.LastError != nil {
+		line, basePos := processor.assembleLine()
+		
+		ctx.dumpLastError(basePos, len(line)-1, line, 
+			"Syntax", processor.LastError)
+		ctx.hasMoreRequests = false
+		return
+	}
+	if rq == nil {
+		ctx.hasMoreRequests = false
+		return
+	}
 	
-	ctx.requestIndex++
+	// Assign request id	
+	rq.Id = ctx.requestId
 	ctx.requestId++
 	
 	if rq.command == nil {
@@ -245,11 +260,11 @@ func (ctx *Context) executeBuiltinRequest(rq *Request) (error) {
 	switch rq.commandName {
 		case "cd":
 			if rq.Options != nil {
-				where := rq.Options.(string)
-				ctx.rewindState(where)
-			} else {
-				ctx.rewindState("")
+				steps := rq.Options.(int)
+				return ctx.rewindState(steps)
 			}
+			
+			return ctx.rewindStateRoot()
 		case "_reload":
 			return ctx.reload()
 		case "exit":
@@ -259,16 +274,15 @@ func (ctx *Context) executeBuiltinRequest(rq *Request) (error) {
 			ctx.running = false
 			return nil
 	}
-	return nil
+	return fmt.Errorf("Not implemented")
 }
 
 func (ctx *Context) runAutoExec() {
-	ctx.parseRequests(ctx.cfg.UserConfig.AutoExec)
-	if ctx.requests == nil {
+	if !ctx.parseRequests(ctx.cfg.UserConfig.AutoExec) {
 		log.Fatalln("Parse error in autoexec command, exiting...")
 	}
 	
-	for ctx.running && ctx.requestIndex < len(ctx.requests) {
+	for ctx.running && ctx.hasMoreRequests {
 		err := ctx.processRequest()
 		if err != nil {
 			log.Fatalln("Error while executing in autoexec command, exiting...")

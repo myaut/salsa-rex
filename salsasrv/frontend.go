@@ -3,7 +3,7 @@ package main
 import (
 	"log"
 	
-	"salsarex"
+	"salsalib"
 	"salsacore"
 	
 	"net/http"
@@ -14,7 +14,7 @@ import (
 // "main" function which registers all handlers
 func createFrontendAPIHandlers(prefix string, server *echo.Echo) {
 	findRepostiories := func (ctx echo.Context) (err error) {
-		repos, err := salsarex.FindRepositories(&salsacore.Repository {
+		repos, err := salsalib.FindRepositories(&salsacore.Repository {
 			Name: ctx.Param("name"),
 			Version: ctx.Param("version"),
 			Lang: ctx.Param("lang"),
@@ -33,7 +33,7 @@ func createFrontendAPIHandlers(prefix string, server *echo.Echo) {
 	server.GET(prefix + "/repo/list/:name/:version/:lang", findRepostiories)
 	
 	server.GET(prefix + "/repo/:key", func (ctx echo.Context) (err error) {
-		repo, err := salsarex.GetRepository(ctx.Param("key"))
+		repo, err := salsalib.GetRepository(ctx.Param("key"))
 		if repo.Error {
 			return echo.NewHTTPError(repo.ErrCode, repo.Message)
 		}
@@ -44,7 +44,7 @@ func createFrontendAPIHandlers(prefix string, server *echo.Echo) {
 	
 	server.GET(prefix + "/repo/:key/fs/read*", func (ctx echo.Context) (err error) {
 		path := "/" + ctx.P(1)
-		file, err := salsarex.GetFileContents(ctx.Param("key"), path)
+		file, err := salsalib.GetFileContents(ctx.Param("key"), path)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 		} 
@@ -58,7 +58,7 @@ func createFrontendAPIHandlers(prefix string, server *echo.Echo) {
 	
 	server.GET(prefix + "/repo/:key/fs/getdents*", func (ctx echo.Context) (err error) {
 		path := "/" + ctx.P(1)
-		entries, dir, err := salsarex.GetDirectoryEntries(ctx.Param("key"), path)
+		entries, dir, err := salsalib.GetDirectoryEntries(ctx.Param("key"), path)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 		} 

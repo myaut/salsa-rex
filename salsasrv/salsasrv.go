@@ -9,8 +9,8 @@ import (
 	
 	"syscall"
 	
-	"salsarex"
-	"salsarex/indexer"
+	"salsalib"
+	"salsalib/indexer"
 	
 	"github.com/go-ini/ini"
 	
@@ -57,7 +57,7 @@ func main() {
  
 func initializeDatabase(cfg *ini.File) (err error) {
 	// load database config
-	var dbCfg salsarex.DBConfig
+	var dbCfg salsalib.DBConfig
 	err = cfg.Section("database").MapTo(&dbCfg)
 	if err != nil || len(dbCfg.URL) == 0 || len(dbCfg.Username) == 0 {
 		return fmt.Errorf("Error in database configuration")
@@ -65,7 +65,7 @@ func initializeDatabase(cfg *ini.File) (err error) {
 	
 	log.Printf("Connecting to arango database at %s...", dbCfg.URL)
 	
-	return salsarex.InitializeDB(&dbCfg, *logDb)
+	return salsalib.InitializeDB(&dbCfg, *logDb)
 }
 
 func startServer(cfg *ini.File) (err error) {
@@ -140,7 +140,7 @@ func setupProcess(cfg *ini.File) (err error) {
 	}
 	
 	if err == nil && procCfg.MaxProcessingRoutines > 0 {
-		salsarex.SetMaxProcessingRoutines(procCfg.MaxProcessingRoutines)
+		salsalib.SetMaxProcessingRoutines(procCfg.MaxProcessingRoutines)
 	}
 	
 	return
@@ -162,6 +162,6 @@ func setRLimit(resource int, limit uint64) (err error) {
 var identifierIndexerFactory = new(indexer.IdentifierIndexerFactory)
 
 func registerIndexers() {
-	salsarex.RegisterIndexer(identifierIndexerFactory)
+	salsalib.RegisterIndexer(identifierIndexerFactory)
 }
 

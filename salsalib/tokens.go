@@ -1,4 +1,4 @@
-package salsarex
+package salsalib
 
 import (
 	// "log"

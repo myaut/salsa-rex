@@ -1,7 +1,7 @@
 package indexer
 
 import (
-	"salsarex"
+	"salsalib"
 	"salsacore"
 	
 	"sync"
@@ -31,13 +31,13 @@ type IdentifierIndexerFactory struct {
 
 type IdentifierIndexer struct {
 	factory *IdentifierIndexerFactory
-	repo *salsarex.Repository
+	repo *salsalib.Repository
 	
 	wg sync.WaitGroup
 	channel chan identifierIndexerMessage
 }
 
-func (factory *IdentifierIndexerFactory) NewIndexer() salsarex.Indexer {
+func (factory *IdentifierIndexerFactory) NewIndexer() salsalib.Indexer {
 	indexer := new(IdentifierIndexer)
 	
 	indexer.factory = factory
@@ -48,7 +48,7 @@ func (factory *IdentifierIndexerFactory) NewIndexer() salsarex.Indexer {
 }
 
 func (*IdentifierIndexerFactory) InitializeDatabase() error {
-	db := salsarex.GetDB()
+	db := salsalib.GetDB()
 	
 	db.CreateCollection(arango.NewCollectionOptions("Identifier", false))
 	
@@ -65,18 +65,18 @@ func (*IdentifierIndexerFactory) GetDependencies() []string {
 	return []string{}
 }
 
-func (indexer *IdentifierIndexer) GetFactory() salsarex.IndexerFactory {
+func (indexer *IdentifierIndexer) GetFactory() salsalib.IndexerFactory {
 	return indexer.factory
 }
 	
-func (indexer *IdentifierIndexer) StartIndexing(repo *salsarex.Repository) error {
+func (indexer *IdentifierIndexer) StartIndexing(repo *salsalib.Repository) error {
 	indexer.repo = repo
 	go identifierIndexCollector(indexer)
 	
 	return nil
 }
 	
-func (indexer *IdentifierIndexer) CreateIndex(file *salsarex.RepositoryFile) error {
+func (indexer *IdentifierIndexer) CreateIndex(file *salsalib.RepositoryFile) error {
 	for index, token := range file.Tokens {
 		if token.Type != salsacore.Ident {
 			continue 
@@ -105,7 +105,7 @@ func (indexer *IdentifierIndexer) FinishIndexing() {
 func identifierIndexCollector(indexer *IdentifierIndexer) {
 	type cachedIdentifier struct {
 		Identifier
-		salsarex.CachedDocument
+		salsalib.CachedDocument
 	}
 	
 	identifiers := make(map[string]*cachedIdentifier)
@@ -137,11 +137,11 @@ func identifierIndexCollector(indexer *IdentifierIndexer) {
 		}
 		
 		identifier.Identifier.Refs = append(
-			identifier.Identifier.Refs, salsarex.NewTokenRef(msg.tokenIndex, msg.fileKey))
+			identifier.Identifier.Refs, salsalib.NewTokenRef(msg.tokenIndex, msg.fileKey))
 	}
 	
 	// Now save everything we got here
-	saver := salsarex.NewBatchSaver("Identifier")
+	saver := salsalib.NewBatchSaver("Identifier")
 	defer saver.Complete()
 	
 	for _, identifier := range identifiers {
@@ -152,6 +152,6 @@ func identifierIndexCollector(indexer *IdentifierIndexer) {
 	indexer.wg.Done()
 }
 
-func (*IdentifierIndexerFactory) DeleteIndex(repo *salsarex.Repository) {
+func (*IdentifierIndexerFactory) DeleteIndex(repo *salsalib.Repository) {
 	// TODO
 }

@@ -2,7 +2,7 @@ package main
 
 import (
 	"salsacore"
-	"salsarex"
+	"salsalib"
 	
 	"net/http"
 		
@@ -13,7 +13,7 @@ import (
 func createBackendAPIHandlers(prefix string, server *echo.Echo) {
 	server.GET(prefix + "/resetdb", func (ctx echo.Context) error {
 		// for debugging
-		salsarex.ResetDB()
+		salsalib.ResetDB()
 		ctx.NoContent(http.StatusOK)
 		return nil
 	})
@@ -26,7 +26,7 @@ func createBackendAPIHandlers(prefix string, server *echo.Echo) {
 			return err
 		}
 		
-		repoKey, err2 := salsarex.CreateParseTask(&repo)	
+		repoKey, err2 := salsalib.CreateParseTask(&repo)	
 		if err2 != nil {
 			return err2
 		}
@@ -39,7 +39,7 @@ func createBackendAPIHandlers(prefix string, server *echo.Echo) {
 		repoKey := ctx.Param("repoKey")
 		taskType := ctx.Param("taskType")
 		
-		status := salsarex.GetProcessingTaskStatus(repoKey, taskType)
+		status := salsalib.GetProcessingTaskStatus(repoKey, taskType)
 		
 		ctx.JSON(http.StatusOK, status)
 		return nil

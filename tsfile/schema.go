@@ -31,13 +31,26 @@ type TSFSchemaHeader struct {
 	// Number of fields in this schema
 	FieldCount uint16
 	
-	pad1 uint32
-	pad2 uint64
+	Pad1 uint32
+	Pad2 uint64
 	
 	Fields [maxFieldCount]TSFSchemaField
 	
 	// Name of the schema (only used in V2 header, but doesn't break V1) 
 	Name [schemaNameLength]byte 
+}
+
+// Decoded representation of schema
+type TSFSchemaFieldInfo struct {
+	FieldName string
+	FieldType int
+	Size uint
+}
+
+type TSFSchemaInfo struct {
+	Name string
+	EntrySize uint64
+	Fields []TSFSchemaFieldInfo
 }
 
 func NewField(name string, goType reflect.Type) TSFSchemaField {
@@ -80,7 +93,7 @@ func NewSchema(name string, fields []TSFSchemaField) (*TSFSchemaHeader, error) {
 	for _, field := range fields {
 		fieldId := schema.FieldCount
 		if fieldId >= maxFieldCount {
-			return nil, fmt.Errorf("Too many fields in schema") 
+			return nil, fmt.Errorf("Invalid schema -- too many fields") 
 		}
 		if field.FieldType == TSFInvalidField {
 			return nil, fmt.Errorf("Invalid field %s", string(field.FieldName[:]))
@@ -115,6 +128,94 @@ func NewStructSchema(goStruct reflect.Type) (*TSFSchemaHeader, error) {
 	}
 	
 	return NewSchema(goStruct.Name(), fields)
+}
+
+// Decode schema header info information struct 
+func (schema *TSFSchemaHeader) Info() (info TSFSchemaInfo) {
+	info.Name = DecodeCStr(schema.Name[:])
+	info.EntrySize = uint64(schema.EntrySize)
+	
+	for fieldId := 0 ; fieldId < int(schema.FieldCount) ; fieldId++ {
+		field := &schema.Fields[fieldId]
+		info.Fields = append(info.Fields, TSFSchemaFieldInfo{
+				FieldName: DecodeCStr(field.FieldName[:]),
+				FieldType: int(field.FieldType),
+				Size: uint(field.Size),
+		})
+	}
+	
+	return
+}
+
+// Checks validity of schema and returns error 
+func (schema *TSFSchemaHeader) Check() error {
+	if schema.FieldCount > maxFieldCount {
+		return fmt.Errorf("Invalid schema -- %d fields is too many for TSFile", schema.FieldCount)
+	}
+	
+	for fieldId := 0 ; fieldId < int(schema.FieldCount) ; fieldId++ {
+		field := &schema.Fields[fieldId]
+		
+		switch field.FieldType {
+			case TSFBoolean, TSFString:
+				// break;
+			
+			case TSFInt:
+				switch field.Size {
+					case 1, 2, 4, 8:
+						break
+					default:
+						return fmt.Errorf("Invalid schema field %s - incorrect size of integer %d",
+							 DecodeCStr(field.FieldName[:]), field.Size)
+				}
+			case TSFFloat:
+				switch field.Size {
+					case uint64(reflect.TypeOf(float32(1)).Size()),
+						 uint64(reflect.TypeOf(float64(1)).Size()):
+						break
+					default:
+						return fmt.Errorf("Invalid schema field %s - incorrect size of float %d",
+							 DecodeCStr(field.FieldName[:]), field.Size)
+				}
+		}
+	}
+	
+	return nil
+}
+
+// Validates that schema matches with other schema or returns error 
+// if not. Useful for checking versioning of files 
+func (schema *TSFSchemaHeader) Validate(other *TSFSchemaHeader) error {
+	if (schema.EntrySize != other.EntrySize ||
+		schema.FieldCount != other.FieldCount)  {
+		return fmt.Errorf("Different schema headers: hdr: %d,%d schema: %d,%d", 
+			schema.EntrySize, schema.FieldCount,
+			other.EntrySize, other.FieldCount)
+			
+	}
+	
+	for fieldId := 0 ; fieldId < int(schema.FieldCount) ; fieldId++ {
+		field1 := &schema.Fields[fieldId]
+		field2 := &other.Fields[fieldId]
+		
+		fieldName := DecodeCStr(field1.FieldName[:])
+		if fieldName != DecodeCStr(field2.FieldName[:]) {
+			return fmt.Errorf("Different schema field %s - other have name %s",
+				fieldName, DecodeCStr(field2.FieldName[:]))
+		}
+		
+		if field1.FieldType != field2.FieldType {
+			return fmt.Errorf("Different schema field %s - type mismatch: (%d, %d)",
+				fieldName, field1.FieldType, field2.FieldType)
+		}
+		
+		if (field1.Offset != field2.Offset || field1.Size != field2.Size) {
+			return fmt.Errorf("Different schema field %s - layout mismatch: (%d:%d, %d:%d)",
+				fieldName, field1.Offset, field1.Size, field2.Offset, field2.Size)
+		}
+	}
+	
+	return nil
 }
 
 func (schema *TSFSchemaHeader) MarshalJSON() ([]byte, error) {

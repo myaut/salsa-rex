@@ -93,10 +93,10 @@ func NewSchema(name string, fields []TSFSchemaField) (*TSFSchemaHeader, error) {
 	for _, field := range fields {
 		fieldId := schema.FieldCount
 		if fieldId >= maxFieldCount {
-			return nil, fmt.Errorf("Invalid schema -- too many fields") 
+			return nil, fmt.Errorf("Invalid schema: too many fields") 
 		}
 		if field.FieldType == TSFInvalidField {
-			return nil, fmt.Errorf("Invalid field %s", string(field.FieldName[:]))
+			return nil, fmt.Errorf("Invalid field type or size %s", string(field.FieldName[:]))
 		}
 		
 		field.Offset = uint64(schema.EntrySize)
@@ -150,7 +150,7 @@ func (schema *TSFSchemaHeader) Info() (info TSFSchemaInfo) {
 // Checks validity of schema and returns error 
 func (schema *TSFSchemaHeader) Check() error {
 	if schema.FieldCount > maxFieldCount {
-		return fmt.Errorf("Invalid schema -- %d fields is too many for TSFile", schema.FieldCount)
+		return fmt.Errorf("Invalid schema: %d fields is too many for TSFile", schema.FieldCount)
 	}
 	
 	for fieldId := 0 ; fieldId < int(schema.FieldCount) ; fieldId++ {
@@ -165,7 +165,7 @@ func (schema *TSFSchemaHeader) Check() error {
 					case 1, 2, 4, 8:
 						break
 					default:
-						return fmt.Errorf("Invalid schema field %s - incorrect size of integer %d",
+						return fmt.Errorf("Invalid schema field %s: incorrect size of integer %d",
 							 DecodeCStr(field.FieldName[:]), field.Size)
 				}
 			case TSFFloat:
@@ -174,7 +174,7 @@ func (schema *TSFSchemaHeader) Check() error {
 						 uint64(reflect.TypeOf(float64(1)).Size()):
 						break
 					default:
-						return fmt.Errorf("Invalid schema field %s - incorrect size of float %d",
+						return fmt.Errorf("Invalid schema field %s: incorrect size of float %d",
 							 DecodeCStr(field.FieldName[:]), field.Size)
 				}
 		}
@@ -200,17 +200,17 @@ func (schema *TSFSchemaHeader) Validate(other *TSFSchemaHeader) error {
 		
 		fieldName := DecodeCStr(field1.FieldName[:])
 		if fieldName != DecodeCStr(field2.FieldName[:]) {
-			return fmt.Errorf("Different schema field %s - other have name %s",
+			return fmt.Errorf("Different schema field %s: other have name %s",
 				fieldName, DecodeCStr(field2.FieldName[:]))
 		}
 		
 		if field1.FieldType != field2.FieldType {
-			return fmt.Errorf("Different schema field %s - type mismatch: (%d, %d)",
+			return fmt.Errorf("Different schema field %s: type mismatch: (%d, %d)",
 				fieldName, field1.FieldType, field2.FieldType)
 		}
 		
 		if (field1.Offset != field2.Offset || field1.Size != field2.Size) {
-			return fmt.Errorf("Different schema field %s - layout mismatch: (%d:%d, %d:%d)",
+			return fmt.Errorf("Different schema field %s: layout mismatch: (%d:%d, %d:%d)",
 				fieldName, field1.Offset, field1.Size, field2.Offset, field2.Size)
 		}
 	}

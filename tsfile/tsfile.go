@@ -60,6 +60,7 @@ const (
 	
 	schemaSize = 3600 + schemaNameLength
 )
+
 type TSFSuperBlock struct {
 	// Time stamp of writing this super block in nanoseconds
 	Time uint64
@@ -134,6 +135,14 @@ type tsfPage struct {
 	full bool
 }
 
+type tsfPageIndex struct {
+	// Page index
+	pageId TSFPageId
+	
+	// Starting entry index
+	start uint32
+}
+
 type tsfSchema struct {
 	header TSFSchemaHeader
 	
@@ -144,7 +153,7 @@ type tsfSchema struct {
 	count uint32
 	
 	// index of page ids per starting index
-	pages map[int]TSFPageId
+	pageIndex []tsfPageIndex
 }
 
 type TSFile struct {
@@ -172,7 +181,6 @@ type TSFile struct {
 	fullPages uint32
 	
 	schemaCount uint32
-	entryCount uint32
 	pageCount TSFPageId
 	
 	// Current generation of pages
@@ -268,17 +276,20 @@ func (tsf *TSFile) loadFileV1(hdrPage *tsfPage) error {
 		return fmt.Errorf("Cannot find valid superblock in header")
 	}
 	
-	// There is a single schema in v1, so load it
-	var schema TSFSchemaHeader
-	hdrPage.read(&schema, hdrByteCount)
-	tag, err := tsf.AddSchema(&schema)
+	// There is a single schema in v1, so load it and set entry count
+	var schemaHdr TSFSchemaHeader
+	hdrPage.read(&schemaHdr, hdrByteCount)
+	tag, err := tsf.AddSchema(&schemaHdr)
 	if err != nil {
 		return err
 	}
+	tsf.schemas[tag.toSchemaId()].count = uint32(sb.Count) 
 	
 	// generate page headers based on entry count in superblock
-	entriesPerPage := tsf.pageSize / uint32(schema.EntrySize)
+	entriesPerPage := tsf.pageSize / uint32(schemaHdr.EntrySize)
 	entryCount := uint32(sb.Count) 
+	
+	tsf.pageHeaders = append(tsf.pageHeaders, TSFPageHeader{Tag: uint16(TSFTagHeader)})
 	pageHeader := TSFPageHeader{
 		Tag: uint16(tag),
 		Count: entriesPerPage,
@@ -289,7 +300,11 @@ func (tsf *TSFile) loadFileV1(hdrPage *tsfPage) error {
 	if entryCount > 0 {
 		pageHeader.Count = entryCount
 		tsf.pageHeaders = append(tsf.pageHeaders, pageHeader)
+		
+		// If last page is not full page, use it for appending entries
+		tsf.dataPagesCache[tag] = []TSFPageId{TSFPageId(len(tsf.pageHeaders)-1)}
 	}
+	tsf.pageCount = TSFPageId(len(tsf.pageHeaders))
 	
 	return nil
 }
@@ -411,7 +426,10 @@ func (tsf *TSFile) loadDataTagV2(pageId TSFPageId, hdr TSFPageHeader) error {
 	
 	schema := &tsf.schemas[schemaId]
 	if hdr.Count > 0 {
-		schema.pages[int(schema.count)] = pageId
+		schema.pageIndex = append(schema.pageIndex, tsfPageIndex{
+				pageId: pageId,
+				start: schema.count,
+		})
 		schema.count += hdr.Count
 	}
 	
@@ -467,6 +485,7 @@ func (tsf *TSFile) AddSchema(header *TSFSchemaHeader) (TSFPageTag, error) {
 			page, _ := tsf.allocateDataPage(schema.tag, TSFSchemaPage)
 			binary.Write(page.buf, binary.LittleEndian, header)
 			page.full = true
+			page.dirty = true
 	}
 	
 	return schema.tag, nil
@@ -479,7 +498,7 @@ func (tsf *TSFile) insertSchema(schemaId TSFSchemaId, header *TSFSchemaHeader) *
 	schema := tsfSchema {
 		header: *header,
 		tag: schemaId.toTag(),
-		pages: make(map[int]TSFPageId),
+		pageIndex: make([]tsfPageIndex, 0),
 	}
 	
 	// We want to get schemaId early (for V2 allocatePage), but if AddSchema 
@@ -492,19 +511,23 @@ func (tsf *TSFile) insertSchema(schemaId TSFSchemaId, header *TSFSchemaHeader) *
 }
 
 // Adds entries to the file (write is deferred)
-func (tsf *TSFile) AddEntries(tag TSFPageTag, entries []interface{}) error {
+func (tsf *TSFile) AddEntries(tag TSFPageTag, entries interface{}) error {
 	schemaId := tag.toSchemaId()
 	if !tsf.isValidSchemaId(schemaId) {
 		return fmt.Errorf("Undefined schema #%d", schemaId)
 	}
+	if reflect.TypeOf(entries).Kind() != reflect.Slice {
+		return fmt.Errorf("Invalid AddEntries() argument, slice is expected")
+	} 
 	
 	start := 0
-	entrySize := tsf.getEntrySize(schemaId)  
-	for start < len(entries) {
+	entrySize := tsf.getEntrySize(schemaId) 
+	totalCount := reflect.ValueOf(entries).Len()
+	for start < totalCount {
 		page, pageId := tsf.getDataPage(tag)
 		if page == nil {
 			page, pageId = tsf.allocateDataPage(tag, 0)
-		} 
+		}
 		
 		count, err := page.writeEntries(start, entries, entrySize)
 		if err != nil {
@@ -523,6 +546,10 @@ func (tsf *TSFile) getEntrySize(schemaId TSFSchemaId) uint32 {
 	tsf.mu.RLock()
 	defer tsf.mu.RUnlock()
 	
+	return tsf.getEntrySizeImpl(schemaId)
+}
+
+func (tsf *TSFile) getEntrySizeImpl(schemaId TSFSchemaId) uint32 {	
 	return uint32(tsf.schemas[schemaId].header.EntrySize)
 }
 
@@ -549,8 +576,20 @@ func (tsf *TSFile) accountPageEntries(page *tsfPage, count uint32,
 	tsf.mu.RLock()
 	defer tsf.mu.RUnlock()
 	
-	atomic.AddUint32(&tsf.schemas[schemaId].count, count)
-	atomic.AddUint32(&tsf.entryCount, count)
+	// Advance page indexes that are going after our page in case 
+	// we are not adding to the last page 
+	schema := &tsf.schemas[schemaId] 
+	for j := len(schema.pageIndex)-1 ; j >= 0 ; j-- {
+		pageIndex := &schema.pageIndex[j]
+		if pageIndex.pageId == pageId {
+			for i := j+1 ; i < len(schema.pageIndex); i++ {
+				atomic.AddUint32(&schema.pageIndex[i].start, count)
+			}
+			break
+		}
+	}
+	
+	atomic.AddUint32(&schema.count, count)
 	page.count = atomic.AddUint32(&tsf.pageHeaders[pageId].Count, count)
 	
 	if page.full {
@@ -558,14 +597,17 @@ func (tsf *TSFile) accountPageEntries(page *tsfPage, count uint32,
 	}
 }
 
-func (page *tsfPage) writeEntries(start int, entries []interface{}, entrySize uint32) (int, error) {
+func (page *tsfPage) writeEntries(start int, entries interface{}, entrySize uint32) (int, error) {
 	// Write to page until it would be full
 	page.mu.Lock()
 	defer page.mu.Unlock()
 	
+	page.dirty = true
+	
 	buf := page.buf
 	count := 0
-	for (start + count) < len(entries) {
+	value := reflect.ValueOf(entries)
+	for (start + count) < value.Len() {
 		if (uint32(buf.Len()) + entrySize) > page.size {
 			// No more space for entries in this page (and this page
 			// is eligible for commiting)
@@ -574,14 +616,15 @@ func (page *tsfPage) writeEntries(start int, entries []interface{}, entrySize ui
 		}
 		
 		size := buf.Len()
-		err := binary.Write(buf, binary.LittleEndian, entries[start+count])
+		v := value.Index(start+count).Interface()
+		err := binary.Write(buf, binary.LittleEndian, v)
 		n := buf.Len() - size
 		
 		if err != nil {
 			return count, err
 		}
 		if uint32(n) != entrySize {
-			buf.Truncate(size)
+			buf.Truncate(buf.Len()-n)
 			return count, fmt.Errorf("Invalid entry of size %d, %d is expected", n, entrySize)
 		}
 		
@@ -606,12 +649,11 @@ func (tsf *TSFile) writePages(sync bool) error {
 	defer tsf.mu.Unlock()
 	
 	for pageId, page := range tsf.pageCache {
-		if page.full || sync {
+		if page.dirty && (page.full || sync) {
 			err := tsf.writePage(page, pageId)
 			if err != nil {
 				return err
 			}
-			
 		}
 		
 		if page.full {
@@ -661,7 +703,18 @@ func (tsf *TSFile) writePage(page *tsfPage, pageId TSFPageId) error {
 		return err
 	}
 	
-	_, err = tsf.file.Write(page.buf.Bytes())
+	// Pad page up to its size for v2+
+	buf := page.buf.Bytes() 
+	if tsf.version >= 2 {
+		padLength := int(page.size) - len(buf) 
+		if padLength > 0 {
+			buf = append(buf, bytes.Repeat([]byte{0}, padLength)...)
+		}
+	}
+	
+	_, err = tsf.file.Write(buf) 
+	
+	page.dirty = false
 	return err
 }
 
@@ -674,10 +727,11 @@ func (tsf *TSFile) GetDataTags() (TSFPageTag, TSFPageTag) {
 }
 
 // Returns schema header of throws error if such schema doesn't exist
-func (tsf *TSFile) GetSchema(schemaId int) (*TSFSchemaHeader, error) {
+func (tsf *TSFile) GetSchema(pageTag TSFPageTag) (*TSFSchemaHeader, error) {
 	tsf.mu.RLock()
 	defer tsf.mu.RUnlock()
 	
+	schemaId := int(pageTag.toSchemaId())
 	if schemaId >= len(tsf.schemas) {
 		return nil, fmt.Errorf("Schema #%d doesn't exist", schemaId)
 	}
@@ -687,10 +741,11 @@ func (tsf *TSFile) GetSchema(schemaId int) (*TSFSchemaHeader, error) {
 
 // Get number of entries for schema. If schema doesn't exist, 
 // returns -1
-func (tsf *TSFile) GetEntryCount(schemaId int) int {
+func (tsf *TSFile) GetEntryCount(pageTag TSFPageTag) int {
 	tsf.mu.RLock()
 	defer tsf.mu.RUnlock()
 	
+	schemaId := int(pageTag.toSchemaId())
 	if schemaId >= len(tsf.schemas) {
 		return -1
 	}
@@ -728,10 +783,10 @@ func (tsf *TSFile) GetEntries(tag TSFPageTag, entries interface{}, start int) er
 			return fmt.Errorf("Page #%d is empty, this is unexpected", pageId)
 		}
 		
-		slice := value.Slice(offset, pageCount)
+		slice := value.Slice(offset, offset+pageCount)
 		err = page.read(slice.Interface(), byteOffset)
 		if err != nil {
-			return err
+			return fmt.Errorf("Error reading page #%d: %v", pageId, err)
 		}
 		
 		start += pageCount
@@ -761,19 +816,35 @@ func (tsf *TSFile) findDataPage(tag TSFPageTag, index int) (TSFPageId, int64, er
 	// If entry wasn't found, some pages were not complete, so we seek
 	// into index using iteration
 	entrySize := int(schema.header.EntrySize)
-	entriesPerPage := (int(tsf.pageSize) / entrySize)
-	startIndex := (index / entriesPerPage) * entriesPerPage
+	if tsf.version == 1 {
+		entriesPerPage := (int(tsf.pageSize) / entrySize)
+		pageId := index / entriesPerPage
+		offset := (index - pageId * entriesPerPage) * entrySize
+		return TSFPageId(pageId+1), int64(offset), nil
+	}
 	
-	for idx := startIndex ; idx != index+1 ; idx++ {
-		if pageId, ok := schema.pages[idx] ; ok {
-			offset := (index-idx)*entrySize
-			return pageId, int64(offset), nil
+	// Binary search page in pageIndex
+	a, b := 0, len(schema.pageIndex) 
+	for b > a {
+		med := a + (b-a)/2
+		pageIndex := schema.pageIndex[med]
+		count := int(tsf.pageHeaders[pageIndex.pageId].Count)
+		start := int(pageIndex.start)
+		
+		if start <= index {
+			if index < (start + count)  {
+				offset := (index-start)*entrySize
+				return pageIndex.pageId, int64(offset), nil
+			}
+			a = med+1
+		} else {
+			b = med
 		}
 	}
 	
 	// Did not found in index -- impossible!
-	return 0, 0, fmt.Errorf("Index for entry [%d;%d] was not found (internal error)", 
-			startIndex, index)
+	return 0, 0, fmt.Errorf("Index for entry #%d was not found (internal error)", 
+			index)
 }
 
 
@@ -804,11 +875,10 @@ func (tsf *TSFile) readPage(pageId TSFPageId) (*tsfPage, error) {
 		return page, nil
 	}
 	if pageId != 0 && pageId >= loadPageId(&tsf.pageCount) {
-		return nil, fmt.Errorf("file doesn't have page %d", pageId)
+		return nil, fmt.Errorf("File doesn't have page %d", pageId)
 	}
 	
 	page = tsf.newPage(tsf.getPageSize(pageId))
-	buf := make([]byte, page.size)
 	
 	tsf.mu.Lock()
 	defer tsf.mu.Unlock()
@@ -816,7 +886,19 @@ func (tsf *TSFile) readPage(pageId TSFPageId) (*tsfPage, error) {
 	// second check under strictier lock
 	if page, ok := tsf.pageCache[pageId]; ok {
 		return page, nil
-	} 
+	}
+	
+	// allocate buffer -- in the case of data page which is not full, 
+	// buffer size should be partial (so we can append to buffer)
+	pageSize := page.size
+	if pageId > 0 {		
+		hdr := &tsf.pageHeaders[pageId] 
+		if hdr.Flags == 0 && hdr.getTag().isDataTag() {
+			pageSize = hdr.Count * tsf.getEntrySizeImpl(hdr.getTag().toSchemaId())
+		}
+		page.count = hdr.Count
+	}
+	buf := make([]byte, pageSize)
 	
 	// really read from file
 	_, err := tsf.file.Seek(tsf.getPageOffset(pageId), io.SeekStart)
@@ -828,15 +910,13 @@ func (tsf *TSFile) readPage(pageId TSFPageId) (*tsfPage, error) {
 	if err != nil {
 		return nil, err
 	}
-	if uint32(n) != page.size && tsf.version == 2 {
-		return nil, fmt.Errorf("invalid read size %d for page %d", page.size, pageId)
+	if uint32(n) != pageSize && tsf.version == 2 {
+		return nil, fmt.Errorf("Invalid read of size %d for page %d (requested size: %d)", 
+				n, pageId, pageSize)
 	}
 	
 	// setup page and return it. header #0 is a special case...
 	page.buf = bytes.NewBuffer(buf)
-	if pageId > 0 {
-		page.count = tsf.pageHeaders[pageId].Count
-	}
 	
 	tsf.tryEvictPages()
 	tsf.pageCache[pageId] = page
@@ -900,6 +980,7 @@ func (tsf *TSFile) updateHeader(pageId TSFPageId) *tsfPage {
 		}
 		
 		page.full = true
+		page.dirty = true
 		return page
 	}
 	
@@ -907,7 +988,7 @@ func (tsf *TSFile) updateHeader(pageId TSFPageId) *tsfPage {
 }
 
 func (tsf *TSFile) updateHeaderV1(pageId TSFPageId, sb *TSFSuperBlock, buf *bytes.Buffer) {
-	sb.Count = atomic.LoadUint32(&tsf.entryCount)
+	sb.Count = atomic.LoadUint32(&tsf.schemas[0].count)
 	
 	binary.Write(buf, binary.LittleEndian, tsf.header)
 	binary.Write(buf, binary.LittleEndian, tsf.schemas[0].header)
@@ -981,11 +1062,15 @@ func (tsf *TSFile) insertPage(page *tsfPage, pageId TSFPageId, tag TSFPageTag, f
 				make([]TSFPageHeader, initialPageCount)...)
 	}
 	
-	schemaId := tag.toSchemaId()
-	if tsf.isValidSchemaId(schemaId) && flags == 0 {
-		// Save page id into per-schema index
-		schema := tsf.schemas[schemaId]
-		schema.pages[int(schema.count)] = pageId
+	if tag.isDataTag() && tsf.isValidSchemaId(tag.toSchemaId()) && flags == 0 {
+		// Save page id into per-schema index.
+		// XXX: in case of concurrent inserts, wouldn't we need to update pageIndex
+		// of following pages?
+		schema := &tsf.schemas[tag.toSchemaId()]
+		schema.pageIndex = append(schema.pageIndex, tsfPageIndex{
+				pageId: pageId,
+				start: schema.count,
+		})
 	}
 	
 	tsf.pageHeaders[pageId].Tag = uint16(tag)
@@ -1019,4 +1104,19 @@ func DecodeCStr(cStr []byte) string {
     }
 	
 	return string(cStr[:l])
+}
+
+// A helper which encodes go string as C string and copies to dst (slice of 
+// the byte array)
+func EncodeCStr(goStr string, dst []byte) int {
+	src := []byte(goStr)
+	
+	copy(dst, src)
+	zIndex := len(dst)-1
+	if len(src) < zIndex {
+		zIndex = len(src)
+	}
+	
+	dst[zIndex] = '\000'
+	return zIndex
 }

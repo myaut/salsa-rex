@@ -167,7 +167,8 @@ func (ctx *Context) parseRequests(line string) bool {
 		return true
 	}
 	
-	parser := ctx.parseLine(line)
+	parser := newParser()
+	parser.parseLine(line)
 	if parser.LastError != nil {
 		ctx.dumpLastError(parser.Position, parser.Position, line, "Parser", parser.LastError)
 		return false

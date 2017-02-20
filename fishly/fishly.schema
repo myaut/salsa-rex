@@ -1,0 +1,61 @@
+#
+# Help output
+
+type handlerGroup struct {
+	type handler struct {
+		type option struct {
+			var index int {
+				help "Index (for positional arguments)"
+			}
+			var -multi alias string {
+				help "Option alias (for options)"
+				cat -d '|'
+			}
+			var slice bool {
+				help "Flag which is true for positional arguments that can be listed multiple times"
+			}
+			var optional bool {
+				help "Flag which is true for options and arguments that are not required for handler execution"
+			}
+			var defaultValue variant
+			
+			help "Option is passed to handler as option with dash, followed by optional argument or positional handler argument"
+		}
+		type options array option
+		
+		var name string {
+			value "exit" {
+				cat -style red
+			}
+		}
+		var help string
+		var options
+		
+		help "Handler implements functionality needed to accomplish user request"
+	}
+	
+	type handlerGroupType enum {
+		value "commands" {
+			help "corresponding handler group contains commands"
+		} 
+		value "io" {
+			help "corresponding handler group have I/O sinks, formatters and filters"
+		}
+	}
+	
+	var name string
+	var type handlerGroupType
+	type handlers array handler
+	
+	cat -block -style bold,blue
+	help "Handler group whose handlers have similar function or deal with similar objects"
+}
+type handlerGroups array handlerGroup
+
+command help handlerGroups {
+	help "Shows help on various commands and handlers"
+	arg -n 1 {
+		help "If specified, shows full help on this handler (-s)"
+	}
+}
+

@@ -72,7 +72,11 @@ type Context struct {
 
 	// ReadLine instance
 	rl *readline.Instance
-
+	
+	// Data schema of outputs
+	schema []*schemaNode
+	schemaHanders map[string]schemaHandler
+	
 	// Help contents for help command
 	help *ini.File
 

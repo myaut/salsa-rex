@@ -66,7 +66,8 @@ func (completer *Completer) Do(line []rune, pos int) (newLine [][]rune, length i
 	
 	// Parse line and ignore its errors. Find token we're trying to complete.
 	// Also find handler which is specified on the left side of it
-	parser := completer.ctx.parseLine(string(line))
+	parser := newParser()
+	parser.parseLine(string(line))
 	if parser.LastError == io.EOF {
 		// If we're have unexpected EOF, complete with expected delimiter
 		if parser.lastDelimiter == 0 {
@@ -82,7 +83,6 @@ func (completer *Completer) Do(line []rune, pos int) (newLine [][]rune, length i
 			case tCommandSeparator:
 				state = root
 			case tRedirection:
-				// TODO: support for sh redirection with implicit "|"
 				state.handler, _ = completer.ctx.cfg.ioHandlers[token.token]
 			case tCommand:
 				state.handler, _ = completer.ctx.availableCommands[token.token]
@@ -90,7 +90,7 @@ func (completer *Completer) Do(line []rune, pos int) (newLine [][]rune, length i
 				state.options = append(state.options, token.token)
 			case tRawArgument, tSingleQuotedArgument, tDoubleQuotedArgument:
 				state.argIndex = token.argIndex
-			case tFileRedirection:
+			default:
 				// Not supported
 				return
 		}

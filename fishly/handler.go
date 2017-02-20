@@ -2,11 +2,11 @@ package fishly
 
 import (
 	"sort"
+
+	"reflect"
 	
 	"strings"
 	"strconv"
-	
-	"reflect"
 )
 
 type handlerType int 
@@ -181,6 +181,7 @@ func (cfg *Config) createOptionsForHandler(descriptor *handlerDescriptor) interf
 
 // Processes options structure using reflect and generates descriptors for it
 func generateOptionDescriptors(options interface{}) []optionDescriptor {
+	// TODO: deprecate this in favor of shwalk interface?
 	if options == nil {
 		// No options supported by this handler
 		return make([]optionDescriptor, 0)
@@ -194,7 +195,7 @@ func generateOptionDescriptors(options interface{}) []optionDescriptor {
 	for fieldIdx := 0 ; fieldIdx < optionsType.NumField() ; fieldIdx++ {
 		field := optionsType.Field(fieldIdx)
 		
-		var descriptor = &optionDescriptor{
+		var descriptor = optionDescriptor{
 			fieldIndex: fieldIdx,
 			argIndex: 0,
 			kind: field.Type.Kind(),
@@ -232,7 +233,7 @@ func generateOptionDescriptors(options interface{}) []optionDescriptor {
 		
 		descriptor.defaultVal = optionsVal.Field(fieldIdx)
 		
-		descriptors = append(descriptors, *descriptor)
+		descriptors = append(descriptors, descriptor)
 	}
 	
 	sort.Sort(descriptors)

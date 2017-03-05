@@ -31,17 +31,13 @@ func (w *streamWrapper) Close() error {
 // stdout sink -- a very simple sink which dumps data directly to 
 // readline stdout. however, it ignores close call
 type stdoutSink struct {
+	HandlerWithoutCompletion
+	HandlerWithoutOptions
 }
 
 func (*stdoutSink) IsTTY(ctx *Context) bool {
+	// TODO: actually identify what os.Stdout is?
 	return true
-}
-
-func (*stdoutSink) NewOptions() interface{} {
-	return nil
-}
-
-func (*stdoutSink) Complete(ctx *Context, rq *CompleterRequest)  {
 }
 
 func (*stdoutSink) NewSink(ctx *Context, rq *IOSinkRequest) (io.WriteCloser, error) {
@@ -72,21 +68,18 @@ func (w *commandWrapper) Close() error {
 
 // pager sink -- spawns pager from config 
 type pagerSink struct {
+	HandlerWithoutCompletion
+	HandlerWithoutOptions
+	
+	command string
 }
 
 func (*pagerSink) IsTTY(ctx *Context) bool {
 	return true
 }
 
-func (*pagerSink) NewOptions() interface{} {
-	return nil
-}
-
-func (*pagerSink) Complete(ctx *Context, rq *CompleterRequest) {
-}
-
-func (*pagerSink) NewSink(ctx *Context, rq *IOSinkRequest) (io.WriteCloser, error) {
-	pager := strings.Split(strings.TrimSpace(ctx.cfg.UserConfig.Pager), " ")
+func (sink *pagerSink) NewSink(ctx *Context, rq *IOSinkRequest) (io.WriteCloser, error) {
+	pager := strings.Split(strings.TrimSpace(sink.command), " ")
 	 
 	cmd := exec.Command(pager[0], pager[1:]...)
 	pipe, err := cmd.StdinPipe()

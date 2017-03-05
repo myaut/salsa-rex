@@ -60,28 +60,33 @@ func main() {
 }
 
 func setupCLI(cfg *ini.File, cliCfg *fishly.Config) error {
-	// Setup cli environment
+	// Setup cli environment 
+	var rlCfg fishly.ReadlineConfig
 	err := cfg.Section("cli").MapTo(&cliCfg.UserConfig)
 	if err == nil {
-		// Slices should be merged properly
-		baseHelp := cliCfg.UserConfig.Help
-		baseStyle := cliCfg.UserConfig.StyleSheet
-		
-		err = cfg.Section("salsa-cli").MapTo(&cliCfg.UserConfig)
-		
-		cliCfg.UserConfig.Help = append(cliCfg.UserConfig.Help, baseHelp...)
-		cliCfg.UserConfig.StyleSheet = append(cliCfg.UserConfig.StyleSheet, baseStyle...)
+		err = cfg.Section("cli").MapTo(&rlCfg)
 	}
 	if err != nil {
 		return fmt.Errorf("Error in CLI configuration: %s", err)
 	}
 	
+	// Load schema paths and redefinitions and merge slices
+	baseSchema := cliCfg.UserConfig.Schema
+	cfg.Section("salsa-cli").MapTo(&cliCfg.UserConfig)
+	cfg.Section("salsa-cli").MapTo(&rlCfg)	
+	cliCfg.UserConfig.Schema = append(cliCfg.UserConfig.Schema, baseSchema...)
+	
 	// Handle history file properly
-	cliCfg.UserConfig.HistoryFile = handleHome(cliCfg.UserConfig.HistoryFile)
+	// cliCfg.UserConfig.HistoryFile = handleHome(cliCfg.UserConfig.HistoryFile)
 	
 	// Setup prompt formatter
 	cliCfg.PromptProgram = "salsa"
 	cliCfg.PromptSuffix = "> "
+	
+	// Setup term driver
+	cliCfg.Readline = &fishly.CLIReadlineFactory{Config: rlCfg}
+	cliCfg.Cancel = &fishly.CLIInterruptHandlerFactory{}
+	
 	return nil
 }
 

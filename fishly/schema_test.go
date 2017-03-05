@@ -6,9 +6,9 @@ import (
 	"strconv" 
 )
 
-func assertSchemaNode(t *testing.T, ctx *Context, i int, name string) (node *schemaNode) {
-	if i < len(ctx.schema) {
-		node = ctx.schema[i]
+func assertSchemaNode(t *testing.T, schema *schemaRoot, i int, name string) (node *schemaNode) {
+	if i < len(schema.nodes) {
+		node = schema.nodes[i]
 	}
 	if node == nil {
 		t.Errorf("Missing schema node #%d", i)
@@ -25,11 +25,11 @@ func assertSchemaStructVariable(t *testing.T, node *schemaNode, i int, name stri
 	}
 	
 	var compound schemaStruct
-	switch node.node.(type) {
+	switch node.data.(type) {
 		case schemaStruct:
-			compound = node.node.(schemaStruct)
+			compound = node.data.(schemaStruct)
 		default:
-			t.Errorf("Unexpected type of node %v, expected schemaStruct", node.node)
+			t.Errorf("Unexpected type of node %v, expected schemaStruct", node.data)
 			return
 	}
 	
@@ -53,11 +53,11 @@ func assertSchemaStructVariableVar(t *testing.T, varNode *schemaNode,
 	}
 	
 	var variable schemaVariable
-	switch varNode.node.(type) {
+	switch varNode.data.(type) {
 		case schemaVariable:
-			variable = varNode.node.(schemaVariable)
+			variable = varNode.data.(schemaVariable)
 		default:
-			t.Errorf("Unexpected type of node %v, expected schemaVariable", varNode.node)
+			t.Errorf("Unexpected type of node %v, expected schemaVariable", varNode.data)
 			return false
 	}
 	
@@ -80,56 +80,62 @@ func assertSchemaStructVariableVar(t *testing.T, varNode *schemaNode,
 }
 
 func TestSchemaSimpleStruct(t *testing.T) {
-	schema := `
+	schemaText := `
 		type x struct { var y string }
 	`
 	tokenParser := newParser()
-	tokenParser.parseLine(schema)
+	tokenParser.parseLine(schemaText)
 	
-	var ctx Context
-	parser := ctx.parseSchema(tokenParser)
+	var schema schemaRoot
+	parser := schema.parseSchema(tokenParser)
 	if parser.LastError != nil {
-		t.Error(parser.LastError, parser.LastToken) 
+		t.Error(parser.LastError) 
 	}
 	
-	x := assertSchemaNode(t, &ctx, 0, "x")
+	x := assertSchemaNode(t, &schema, 0, "x")
 	y := assertSchemaStructVariable(t, x, 0, "y")
 	assertSchemaStructVariableVar(t, y, varString, "")
 }
 
 func TestSchemaComplexStruct(t *testing.T) {
-	schema := `
+	schemaText := `
 		type x struct { 
 			type s struct {
 				var i int
 			}
 			type ss array s
 			var z ss
-			var -multi y string {
+			var -list y string {
 				help "axis"
 			}
 			
 			help "hello"
 		}
+		
+		command x x {
+			opt -arg 1 {
+				help "help"
+			}
+		}
 	`
 	tokenParser := newParser()
-	tokenParser.parseLine(schema)
+	tokenParser.parseLine(schemaText)
 	
-	var ctx Context
-	parser := ctx.parseSchema(tokenParser)
+	var schema schemaRoot
+	parser := schema.parseSchema(tokenParser)
 	if parser.LastError != nil {
-		t.Error(parser.LastError, parser.LastToken) 
+		t.Error(tokenParser.Tokens[parser.LastError.index], parser.LastError.err) 
 	}
 	
-	x := assertSchemaNode(t, &ctx, 0, "x")
+	x := assertSchemaNode(t, &schema, 0, "x")
 	z := assertSchemaStructVariable(t, x, 0, "z")
 	assertSchemaStructVariableVar(t, z, varArray, "ss")
 	y := assertSchemaStructVariable(t, x, 1, "y")
 	
 	if assertSchemaStructVariableVar(t, y, varString, "") {
-		yv := y.node.(schemaVariable)
-		if !yv.multiVar {
-			t.Errorf("y should be a multivar")
+		yv := y.data.(schemaVariable)
+		if !yv.isList {
+			t.Errorf("y should be a list")
 		}
 		if y.help != "axis" {
 			t.Errorf("Unexpected help string '%s' for y", strconv.Quote(y.help))
@@ -151,7 +157,7 @@ func (handler *testSchemaHandler) HandleCommand(node *schemaNode, cmd *cmdComman
 }
 
 func TestSchemaStructHandler(t *testing.T) {
-	schema := `
+	schemaText := `
 		type x struct { 
 			var y string 
 			
@@ -159,25 +165,135 @@ func TestSchemaStructHandler(t *testing.T) {
 		}
 	`
 	tokenParser := newParser()
-	tokenParser.parseLine(schema)
+	tokenParser.parseLine(schemaText)
 	
-	var ctx Context
+	var schema schemaRoot
 	
 	handler := testSchemaHandler{
 		nodeId: -1,
 	}
-	ctx.schemaHanders = map[string]schemaHandler{
+	schema.handlers = map[string]schemaHandler{
 		"test": &handler,
 	}
 	
-	parser := ctx.parseSchema(tokenParser)
+	parser := schema.parseSchema(tokenParser)
 	if parser.LastError != nil {
-		t.Error(parser.LastError, parser.LastToken) 
+		t.Error(parser.LastError) 
 	}
 	
-	assertSchemaNode(t, &ctx, 0, "x")
+	assertSchemaNode(t, &schema, 0, "x")
 	if handler.nodeId != schemaNodeId(0) {
 		t.Errorf("Handler didn't work, node id: %d", handler.nodeId)
 	}
 }
 
+func assertTokenPathError(t *testing.T, path *TokenPath, errmsg string) {
+	if path.lastError == nil {
+		t.Errorf("Error at %s didn't produce error", path.GetPath())
+		return
+	}
+	
+	if path.lastError.Error() != errmsg {
+		t.Errorf("Error at %s produced incorrect error", path.GetPath())
+		t.Logf("%s (expected)", errmsg)
+		t.Logf("%s (actual)", path.lastError.Error())
+	}
+	
+	path.lastError = nil
+}
+
+func assertTokenPath(t *testing.T, path *TokenPath, expected string) {
+	actual := path.GetPath()
+	if actual != expected {
+		t.Error("Incorrect path: ", path.String())
+		t.Logf("%s (expected)", expected)
+		t.Logf("%s (actual)", actual)
+	}
+	
+	if path.lastError != nil {
+		t.Errorf("Error at %s: %v", expected, path.lastError)
+	}
+}
+
+func TestTokenPath(t *testing.T) {
+	schemaText := `
+		type object struct {
+			type ctag struct {
+				var tag string
+				var rate string
+			}
+			type tag union {
+				var ctag
+				var xtag string
+				
+				default string
+			}
+			type tags array tag
+			
+			type counter struct {
+				var x int
+			}
+			type counters array counter 
+			
+			var prop1 string {
+				value "value"
+			}
+			var tags
+			var counters
+		}
+		type objects array object
+	`
+	
+	tokenParser := newParser()
+	tokenParser.parseLine(schemaText)
+
+	var schema schemaRoot
+	parser := schema.parseSchema(tokenParser)
+	if parser.LastError != nil {
+		t.Error(tokenParser.Tokens[parser.LastError.index], parser.LastError.err) 
+	}
+	
+	var path TokenPath
+	path.schema = &schema
+	
+	path.UpdatePath(Token{TokenType: ObjectStart, Tag: "objects"})
+	path.UpdatePath(Token{TokenType: ObjectStart, Tag: "object"})
+	
+		path.UpdatePath(Token{TokenType: Value, Tag: "prop1", Text: "value", RawValue: "value"})
+		assertTokenPath(t, &path, "objects, object -> var prop1 -> value")
+		
+		path.UpdatePath(Token{TokenType: Value, Tag: "prop2", RawValue: 2})
+		assertTokenPathError(t, &path, "Undefined variable 'prop2'")
+		assertTokenPath(t, &path, "objects, object")
+	
+		path.UpdatePath(Token{TokenType: ObjectStart, Tag: "tags"})
+		assertTokenPath(t, &path, "objects, object -> var tags, tags")
+		
+		path.UpdatePath(Token{TokenType: Value, Tag: "xtag", RawValue: "tag"})
+		assertTokenPath(t, &path, "objects, object -> var tags, tags -> union tag -> var xtag")
+		
+			path.UpdatePath(Token{TokenType: ObjectStart, Tag: "ctag"})
+			path.UpdatePath(Token{TokenType: Value, Tag: "tag", RawValue: "tag"})
+			assertTokenPath(t, &path, "objects, object -> var tags, tags -> union tag -> var ctag, ctag -> var tag")
+			path.UpdatePath(Token{TokenType: Value, Tag: "rate", RawValue: 10})
+			assertTokenPath(t, &path, "objects, object -> var tags, tags -> union tag -> var ctag, ctag -> var rate")
+			path.UpdatePath(Token{TokenType: ObjectEnd})	// ctag
+		
+		path.UpdatePath(Token{TokenType: Value, RawValue: "text"})
+		assertTokenPath(t, &path, "objects, object -> var tags, tags -> union tag -> var ")
+		path.UpdatePath(Token{TokenType: ObjectEnd})	// tags
+	
+		path.UpdatePath(Token{TokenType: ObjectStart, Tag: "counters"})
+		path.UpdatePath(Token{TokenType: ObjectStart, Tag: "counter"})
+		path.UpdatePath(Token{TokenType: Value, Tag: "x", RawValue: 10})
+		path.UpdatePath(Token{TokenType: ObjectEnd})	// counters
+		path.UpdatePath(Token{TokenType: ObjectEnd})	// counter
+		
+		path.UpdatePath(Token{TokenType: ObjectStart, Tag: "sum"})
+		path.UpdatePath(Token{TokenType: Value, Tag: "x", RawValue: 100})
+		path.UpdatePath(Token{TokenType: ObjectEnd})	// counters
+		
+	path.UpdatePath(Token{TokenType: ObjectEnd})	// objects
+	path.UpdatePath(Token{TokenType: ObjectEnd})	// object
+	assertTokenPath(t, &path, "")
+}

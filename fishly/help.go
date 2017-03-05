@@ -78,7 +78,7 @@ func (cmd *helpCmd) Execute(ctx *Context, rq *Request) (err error) {
 		ioh: ioh,
 	}
 	
-	ioh.StartArray("handlerGroups")
+	ioh.StartObject("handlerGroups")
 	if descriptor != nil {
 		hrq.verbose = true
 		hrq.writeHandler(descriptor)
@@ -99,7 +99,7 @@ func (cmd *helpCmd) Execute(ctx *Context, rq *Request) (err error) {
 		}
 	}
 	hrq.groupDone()
-	ioh.EndArray()
+	ioh.EndObject()
 	
 	return
 }
@@ -115,18 +115,21 @@ func (rq *helpRq) writeBuiltin(name string) {
 		ioh.WriteFormattedValue("name", "Builtin", rq.lastGroup)
 		ioh.WriteString("type", "commands")
 		
-		ioh.StartArray("handlers")
+		ioh.StartObject("handlers")
 	}
 	
-	basePath := fmt.Sprintf("_builtins.%s", name)
-	help := rq.ctx.help.Section(basePath)
+	schema := rq.ctx.cfg.schema.findCommand(name)
+	if schema == nil {
+		basePath := fmt.Sprintf("_builtins.%s", name)
+		schema = rq.ctx.cfg.schema.findCommand(basePath)
+	}
 	
 	ioh.StartObject("handler")
 	ioh.WriteString("name", name)
-	ioh.WriteString("usage", help.Key("Usage").String())
+	ioh.WriteString("usage", schema.toCommand().usage)
 	
 	if rq.verbose {
-		ioh.WriteString("help", help.Key("Text").String())
+		ioh.WriteString("help", schema.getHelp())
 	}
 	
 	ioh.EndObject()
@@ -149,87 +152,90 @@ func (rq *helpRq) writeHandler(descriptor *handlerDescriptor) {
 				ioh.WriteString("type", "I/O handlers")
 		}
 		
-		ioh.StartArray("handlers")
+		ioh.StartObject("handlers")
 		rq.lastGroup = descriptor.group
 	}
   	
-  	basePath := fmt.Sprintf("%s.%s", descriptor.group, descriptor.name)
-	options := generateOptionDescriptors(rq.ctx.cfg.createOptionsForHandler(descriptor))
+  	schema := rq.ctx.cfg.schema.findCommand(descriptor.name)
+	if schema == nil {
+		basePath := fmt.Sprintf("%s.%s", descriptor.group, descriptor.name)
+		schema = rq.ctx.cfg.schema.findCommand(basePath)
+	}
+	
+	optDescriptors := generateOptionDescriptors(
+		rq.ctx.cfg.createOptionsForHandler(descriptor), schema.toCommand())
 	
 	ioh.StartObject("handler")
 	ioh.WriteString("name", descriptor.name)
-	rq.printUsage(options)
+	rq.printUsage(optDescriptors)
 	
 	if rq.verbose {
-		help := rq.ctx.help.Section(basePath)
-		ioh.WriteString("help", help.Key("Text").String())
+		ioh.WriteString("help", schema.getHelp())
 		
 		// Dump options & arguments help
-		ioh.StartArray("options")
-		for _, od := range options {
-			if od.undocumented {
+		ioh.StartObject("options")
+		
+		for _, od := range optDescriptors {
+			if od.option.hasFlag("undoc") {
 				continue
 			}
-			
-			var optionPath string
 			
 			ioh.StartObject("option")
 			if od.argIndex > 0 {
 				ioh.WriteRawValue("index", od.argIndex)
-				optionPath = fmt.Sprintf("%s@%d", basePath, od.argIndex)
 			} else {
-				for _, opt := range od.options {
-					ioh.WriteString("alias", fmt.Sprintf("-%s", opt))					
+				aliases := make([]string, len(od.aliases))
+				for i, opt := range od.aliases {
+					aliases[i] = fmt.Sprintf("-%s", opt)		
+				}
+				ioh.WriteFormattedValue("aliases", strings.Join(aliases, "|"), od.aliases)			
+			}
+			
+			if len(od.argName) > 0 { 
+				argName := od.argName
+				if od.node != nil {
+					// Use argument redefined argument name from schema
+					opt := od.node.toCommandOption()
+					if len(opt.argName) > 0 {
+						argName = opt.argName
+					}
 				}
 				
-				optionPath = fmt.Sprintf("%s-%s", basePath, od.findLongestAlias())
+				ioh.WriteString("argName", argName)	
 			}
 			
-			// Find help section string also considering inherited help
-			help := rq.ctx.help.Section(optionPath)
-			for help.HasKey("Inherit") {
-				help = rq.ctx.help.Section(help.Key("Inherit").String())
-			}
-			
-			if len(od.argName) > 0 {
-				// Use argument name from 
-				argName := help.Key("ArgName").String()
-				if len(argName) == 0 {
-					argName = od.argName
-				}
-				
-				ioh.WriteString("arg", od.argName)	
-			}
-			
-			if od.kind == reflect.Slice {
+			if od.option.field.Type.Kind() == reflect.Slice {
 				ioh.WriteFormattedValue("slice", "...", true)
 			}
-			if od.optional {
+			if od.option.hasFlag("opt") {
 				ioh.WriteFormattedValue("optional", "(opt)", true)
+			}
+			if od.option.hasFlag("count") {
+				ioh.WriteFormattedValue("counting", "*", true)
 			}
 			
 			// Print default value but only if it is different than default initialization
 			printDefaultVal := true
-			switch od.kind {
+			switch od.option.field.Type.Kind() {
 				case reflect.Slice, reflect.Array:
-					printDefaultVal = (od.defaultVal.Len() > 0)
+					printDefaultVal = (od.option.fieldValue.Len() > 0)
 				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-					printDefaultVal = (od.defaultVal.Int() != 0)
+					printDefaultVal = (od.option.fieldValue.Int() != 0)
 				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-					printDefaultVal = (od.defaultVal.Uint() > 0)
+					printDefaultVal = (od.option.fieldValue.Uint() > 0)
 				case reflect.Bool:
-					printDefaultVal = od.defaultVal.Bool()
+					printDefaultVal = od.option.fieldValue.Bool()
 			}
 			if printDefaultVal {
-				ioh.WriteRawValue("defaultValue", od.defaultVal)
+				ioh.WriteRawValue("defaultValue", od.option.fieldValue)
 			}
 			
-			ioh.WriteString("help", help.Key("Text").String())
+			ioh.WriteString("help", od.node.getHelp())
 			
 			ioh.EndObject()			
 		}
 		
-		ioh.EndArray()
+		ioh.EndObject()
 	}
 	
 	ioh.EndObject() // /handler
@@ -239,7 +245,7 @@ func (rq *helpRq) printUsage(optionDescriptors []optionDescriptor) {
 	options := make([]string, len(optionDescriptors))
 	
 	for index, od := range optionDescriptors {
-		if od.undocumented {
+		if od.option.hasFlag("undoc") {
 			continue
 		}
 		
@@ -248,19 +254,22 @@ func (rq *helpRq) printUsage(optionDescriptors []optionDescriptor) {
 		if od.argIndex > 0 {
 			option = od.argName
 			
-			if od.kind == reflect.Slice {
+			if od.option.field.Type.Kind() == reflect.Slice {
 				option = fmt.Sprintf("%s...", option)
 			}
 		} else {
-			option = "-" + strings.Join(od.options, "|-")
+			option = "-" + strings.Join(od.aliases, "|-")
 			
 			if len(od.argName) > 0 {
 				option = fmt.Sprintf("%s %s", option, strings.ToUpper(od.argName))	
 			}
 		}
 		
-		if od.optional {
+		if od.option.hasFlag("opt") {
 			option = fmt.Sprintf("[%s]", option)
+		}
+		if od.option.hasFlag("count") {
+			option = fmt.Sprintf("%s *", option)
 		}
 		
 		options[index] = option
@@ -271,7 +280,7 @@ func (rq *helpRq) printUsage(optionDescriptors []optionDescriptor) {
 
 func (rq *helpRq) groupDone() {
 	if len(rq.lastGroup) > 0 {
-		rq.ioh.EndArray()
+		rq.ioh.EndObject()
 		rq.ioh.EndObject()
 	}
 }

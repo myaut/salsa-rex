@@ -6,7 +6,6 @@ import (
 	"reflect"
 	
 	"strings"
-	"strconv"
 )
 
 type handlerType int 
@@ -28,6 +27,12 @@ type Handler interface {
 	Complete(ctx *Context, rq *CompleterRequest)
 }
 
+// Helper mixins that can be embedded to avoid implementation of unsupported functions
+type HandlerWithoutCompletion struct {
+}
+type HandlerWithoutOptions struct {
+}
+
 type handlerDescriptor struct {
 	// Name of the handler
 	name string
@@ -46,19 +51,14 @@ type handlerDescriptor struct {
 type handlerTable map[string]*handlerDescriptor
 
 type optionDescriptor struct {
-	// Index of the field in structure 
-	fieldIndex int
-	
-	options []string
+	// Cached information from structure
+	aliases []string
 	argIndex int
-	kind reflect.Kind
-	
-	optional bool
-	undocumented bool
-	
-	// Some helpers for help scrapped from structure
 	argName string
-	defaultVal reflect.Value
+	
+	// Lower-layer option & corresponding schema node (if found)
+	option cmdOption
+	node *schemaNode
 }
 type optionDescriptorSlice []optionDescriptor
 
@@ -115,17 +115,11 @@ func (cfg *Config) registerBuiltinHandlers() {
 	cfg.RegisterCommand(new(helpCmd), "common", "help")
 	cfg.RegisterCommand(new(historyCmd), "common", "history")
 	
-	stdout := new(stdoutSink)
-	cfg.RegisterIOSink(stdout, "stdout")
-	if cfg.DefaultSink == nil {
-		cfg.DefaultSink = stdout
-	}
+	json := new(jsonFormatter)
+	cfg.RegisterIOFormatter(json, "json")
 	
-	pager := new(pagerSink)
-	cfg.RegisterIOSink(pager, "pager")
-	if cfg.DefaultPagerSink == nil {
-		cfg.DefaultPagerSink = pager
-	}
+	trace := new(traceFormatter)
+	cfg.RegisterIOFormatter(trace, "_trace")
 	
 	cat := new(textFormatter)
 	cfg.RegisterIOFormatter(cat, "cat")
@@ -133,12 +127,8 @@ func (cfg *Config) registerBuiltinHandlers() {
 		cfg.DefaultTextFormatter = cat
 	}
 	
-	color := new(textFormatter)
-	color.richText = true
-	cfg.RegisterIOFormatter(color, "color")
-	if cfg.DefaultRichTextFormatter == nil {
-		cfg.DefaultRichTextFormatter = color
-	}
+	cat.schema = newTextSchema()
+	cfg.schema.handlers["text"] = cat.schema
 }
 
 // Finds command corresponding to a descriptor and returns it. If descriptor is not 
@@ -179,83 +169,49 @@ func (cfg *Config) createOptionsForHandler(descriptor *handlerDescriptor) interf
 	return nil;
 }
 
-// Processes options structure using reflect and generates descriptors for it
-func generateOptionDescriptors(options interface{}) []optionDescriptor {
-	// TODO: deprecate this in favor of shwalk interface?
-	if options == nil {
-		// No options supported by this handler
-		return make([]optionDescriptor, 0)
+// Gathers extra info about options sort them and returns as help-friendly
+// optionDescriptor slice
+func generateOptionDescriptors(optStruct interface{}, command schemaCommand) optionDescriptorSlice {
+	if optStruct == nil {
+		return make(optionDescriptorSlice, 0)
 	}
 	
-	optionsType := reflect.TypeOf(options).Elem()
-	optionsVal := reflect.ValueOf(options).Elem()
+	descriptor := generateOptionStructDescriptor(optStruct)
+	numOpts, numArgs := len(descriptor.options), len(descriptor.args)
 	
-	descriptors := make(optionDescriptorSlice, 0, optionsType.NumField())
-	
-	for fieldIdx := 0 ; fieldIdx < optionsType.NumField() ; fieldIdx++ {
-		field := optionsType.Field(fieldIdx)
-		
-		var descriptor = optionDescriptor{
-			fieldIndex: fieldIdx,
-			argIndex: 0,
-			kind: field.Type.Kind(),
-		}
-		
-		var flags []string
-		
-		if optTag := field.Tag.Get("opt"); len(optTag) > 0 {
-			// This is option in format opt:"alias1|alias2,opt"
-			flags = strings.Split(optTag, ",")
-			descriptor.options = strings.Split(flags[0], "|")
-			sort.Strings(descriptor.options)
-			
-			if descriptor.kind != reflect.Bool {
-				descriptor.argName = strings.ToUpper(field.Name)
-			}
-			
-			flags = flags[1:]
-		} else if argTag := field.Tag.Get("arg"); len(argTag) > 0 {
-			flags = strings.Split(argTag, ",")
-			descriptor.argIndex, _ = strconv.Atoi(flags[0])
-			descriptor.argName = strings.ToUpper(field.Name)
-			
-			flags = flags[1:]
-		}
-		
-		for _, flag := range flags {
-			switch flag {
-				case "opt":
-					descriptor.optional = true
-				case "undoc":
-					descriptor.undocumented = true
-			}
-		}
-		
-		descriptor.defaultVal = optionsVal.Field(fieldIdx)
-		
-		descriptors = append(descriptors, descriptor)
-	}
-	
-	sort.Sort(descriptors)
-	return descriptors
-}
-
-func (od optionDescriptor) matchOption(opt string) bool { 
-	if len(od.options) == 0{
-		return false
-	}
-	
-	// Check if one of the aliases in descriptor option matches
-	for _, alias := range od.options {
-		if alias == opt {
-			return true
+	options := make(optionDescriptorSlice, numOpts+numArgs)
+	for optIndex, opt := range descriptor.options {
+		options[optIndex].option = opt
+		if opt.hasFlag("count") || opt.field.Type.Kind() == reflect.Bool {
+			options[optIndex].argName = strings.ToUpper(opt.field.Name)
 		}
 	}
-	return false
+	for alias, optIndex := range descriptor.optMap {
+		options[optIndex].aliases = append(options[optIndex].aliases, alias)
+		if node, ok := command.options[alias]; ok {
+			options[optIndex].node = node		
+		}
+	}
+	for argIndex0, arg := range descriptor.args {
+		var node *schemaNode
+		if argIndex0 < len(command.args) {
+			node = command.args[argIndex0]
+		}
+		
+		options[numOpts+argIndex0] = optionDescriptor{ 
+			option: arg,
+			argIndex: argIndex0+1,
+			argName: strings.ToUpper(arg.field.Name),
+			node: node,
+		}
+	}
+	
+	sort.Sort(options)
+	return options
 }
 
 func (od optionDescriptor) findLongestAlias() (longestAlias string) { 
-	for _, alias := range od.options {
+	for _, alias := range od.aliases {
 		if len(alias) > len(longestAlias) {
 			longestAlias = alias
 		}
@@ -272,7 +228,7 @@ func (ods optionDescriptorSlice) Less(i, j int) bool {
 	
 	// Compare options lexicographically
 	if key1 == key2 && key1 < 0 {
-		return ods[i].options[0] < ods[j].options[0] 
+		return ods[i].aliases[0] < ods[j].aliases[0] 
 	}
 	
 	return key1 < key2
@@ -282,13 +238,14 @@ func (od optionDescriptor) sortKey() int {
 	// Assign weight sort key to prioritize options/arguments:
 	// Optional opts -> Required opts -> Args by number -> vararg
 	if od.argIndex > 0 {
-		if od.kind == reflect.Slice {
+		if od.option.field.Type.Kind() == reflect.Slice {
 			return 1000
 		}
 		
 		return od.argIndex
 	}
-	if od.optional {
+	
+	if od.option.hasFlag("opt") {
 		return -2
 	}
 	
@@ -297,4 +254,16 @@ func (od optionDescriptor) sortKey() int {
 
 func (ods optionDescriptorSlice) Swap(i, j int) { 
 	ods[i], ods[j] = ods[j], ods[i]
+}
+
+
+func (ods optionDescriptorSlice) resolveSchemaNodes(command schemaCommand) {
+	// TODO:
+}
+
+func (*HandlerWithoutCompletion) Complete(ctx *Context, rq *CompleterRequest) {
+}
+func (*HandlerWithoutOptions) NewOptions() interface{} {
+	var opt struct{}
+	return &opt
 }

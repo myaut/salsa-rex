@@ -87,7 +87,7 @@ func (cmd *listReposCmd) Execute(ctx *fishly.Context, rq *fishly.Request) (err e
 	}
 	defer ioh.CloseOutput()
 	
-	ioh.StartArray("repositories")
+	ioh.StartObject("repositories")
 	for _, repo := range repos {
 		ioh.StartObject("repository")
 		
@@ -99,7 +99,7 @@ func (cmd *listReposCmd) Execute(ctx *fishly.Context, rq *fishly.Request) (err e
 		
 		ioh.EndObject()
 	}
-	ioh.EndArray()
+	ioh.EndObject()
 	
 	return
 }
@@ -321,7 +321,7 @@ func (cmd *listFilesCmd) Execute(ctx *fishly.Context, rq *fishly.Request) (err e
 	}
 	defer ioh.CloseOutput()
 	
-	ioh.StartArray("fileLists")
+	ioh.StartObject("fileLists")
 	for rootPath, files := range allFiles {
 		ioh.StartObject("fileList")
 		
@@ -329,7 +329,7 @@ func (cmd *listFilesCmd) Execute(ctx *fishly.Context, rq *fishly.Request) (err e
 			ioh.WriteFormattedValue("path", fmt.Sprintf("%s contents:", rootPath), rootPath)
 		}
 		
-		ioh.StartArray("files")
+		ioh.StartObject("files")
 		for _, file := range files {
 			typeName, fileName := "file", file.Name
 			switch file.FileType {
@@ -343,8 +343,8 @@ func (cmd *listFilesCmd) Execute(ctx *fishly.Context, rq *fishly.Request) (err e
 			
 			if options.Long {
 				ioh.StartObject("entry")
-				ioh.WriteRawValue("size", file.FileSize)
 				ioh.WriteString("type", typeName)
+				ioh.WriteRawValue("size", file.FileSize)
 				ioh.WriteString("name", file.Name)
 				ioh.EndObject()
 			} else {
@@ -352,9 +352,9 @@ func (cmd *listFilesCmd) Execute(ctx *fishly.Context, rq *fishly.Request) (err e
 			}
 		}
 		ioh.EndObject()
-		ioh.EndArray()
+		ioh.EndObject()
 	}
-	ioh.EndArray()
+	ioh.EndObject()
 	
 	return
 }
@@ -478,11 +478,11 @@ func (cmd *printFileCmd) Execute(ctx *fishly.Context, rq *fishly.Request) (err e
 	// them simultaneously. 
 	tokenIndex := 0
 	
-	ioh.StartArray("lines")
+	ioh.StartObject("lines")
 	for lineno, line := range text.Lines {
 		// Use line numbering from 1 (token columns also do that)
 		lineno++
-		ioh.StartArray("line")
+		ioh.StartObject("line")
 		if options.LineNumbers {
 			ioh.WriteRawValue("lineno", lineno)	
 		}
@@ -523,9 +523,9 @@ func (cmd *printFileCmd) Execute(ctx *fishly.Context, rq *fishly.Request) (err e
 			}
 		}
 		
-		ioh.EndArray()
+		ioh.EndObject()
 	}
-	ioh.EndArray()
+	ioh.EndObject()
 	
 	return
 }

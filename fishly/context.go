@@ -2,16 +2,16 @@ package fishly
 
 import (
 	"fmt"
+	"bufio"
 	"log"
+	
 	"strings"
+
+	"os"
 
 	"net/url"
 	"path/filepath"
-
-	"github.com/go-ini/ini"
-
-	// readline "gopkg.in/readline.v1"
-	readline "github.com/chzyer/readline"
+	
 )
 
 //
@@ -60,8 +60,10 @@ type Context struct {
 	External ExternalContext
 
 	// Current prompt set by external context (contains context-
-	// specific information such as formatted path)
+	// specific information such as formatted path). FullPrompt
+	// contains full text to be used by readline driver
 	Prompt string
+	FullPrompt string
 
 	// Context states history. first is current state,
 	// last is "root" state
@@ -70,30 +72,65 @@ type Context struct {
 	// Configuration of Context instance
 	cfg *Config
 
-	// ReadLine instance
-	rl *readline.Instance
+	// Customizable ReadLine driver
+	rl ReadlineDriver
 	
-	// Data schema of outputs
-	schema []*schemaNode
-	schemaHanders map[string]schemaHandler
-	
-	// Help contents for help command
-	help *ini.File
-
-	// Stylesheet for text formatter
-	style *textStyleNode
-
 	// Commands available in the current state
 	availableCommands handlerTable
 
 	// Requests state
-	cmdProcessor    *cmdTokenProcessor
-	hasMoreRequests bool
+	cmdParser *cmdTokenParser
 	requestId       int
 
-	// For exit
-	running  bool
+	// Exit code. While context is running, set to -1
 	exitCode int
+}
+
+// Creates new context from a config (and initializes config)
+func newContext(cfg *Config, extCtx ExternalContext) (ctx *Context, err error) {
+	// Create and setup context object
+	ctx = new(Context)
+	ctx.External = extCtx
+	ctx.cfg = cfg
+	ctx.exitCode = -1
+	
+	cfg.schema.init()
+	ctx.cfg.registerBuiltinHandlers()
+	
+	// Initialize readline driver
+	ctx.rl, err = ctx.cfg.Readline.Create(ctx)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Reload schema (requires rl.Stderr() for errors)
+	err = ctx.reloadSchema()
+	if err != nil {
+		ctx.rl.Close()
+		return nil, err
+	}
+	
+	
+	// Some redirections 
+	log.SetOutput(ctx.rl.Stderr())
+	
+	// Create first root state
+	ctx.states = make([]ContextState, 0, 1)
+	ctx.PushState(true)
+	
+	if len(cfg.UserConfig.InitContextURL) > 0 {
+		ctxUrl, err := url.Parse(cfg.UserConfig.InitContextURL) 
+		if err != nil {
+			return nil, err
+		}
+		err = ctx.PushStateFromURL(ctxUrl, true)
+		if err != nil {
+			return nil, err
+		}
+	}
+	ctx.tick()
+	
+	return ctx, nil
 }
 
 // Sets current state of the context as root state
@@ -176,7 +213,7 @@ func (ctx *Context) tick() {
 	if !state.isNew {
 		return
 	}
-
+	
 	// Notify external context about state change with a possibility
 	// to update prompt
 	err := ctx.External.Update(ctx)
@@ -196,7 +233,7 @@ func (ctx *Context) tick() {
 	}
 
 	// Updates prompt
-	ctx.rl.SetPrompt(ctx.cfg.PromptProgram + " " + ctx.Prompt + ctx.cfg.PromptSuffix)
+	ctx.FullPrompt = ctx.cfg.PromptProgram + " " + ctx.Prompt + ctx.cfg.PromptSuffix
 
 	// Re-compute list of available commands
 	ctx.availableCommands = make(handlerTable)
@@ -214,27 +251,53 @@ func (ctx *Context) tick() {
 	state.isNew = false
 }
 
-// (Re-)loads configuration files (help, style)
-func (ctx *Context) reload() (err error) {
-	// Load help files
-	helpFiles := make([]interface{}, len(ctx.cfg.Help))
-	for index, helpFile := range ctx.cfg.Help {
-		helpFiles[index] = helpFile
+// (Re-)loads schema
+func (ctx *Context) reloadSchema() error {
+	ctx.cfg.schema.reset()
+	
+	for _, schemaPath := range ctx.cfg.Schema {
+		if !ctx.loadSchema(schemaPath) {
+			return fmt.Errorf("Error loading schema file %s", schemaPath)
+		}
 	}
+	return nil
+}
 
-	ctx.help, err = ini.Load(helpFiles[0], helpFiles[1:]...)
+func (ctx *Context) loadSchema(fpath string) bool {
+	f, err := os.Open(fpath)
 	if err != nil {
-		return
+		log.Fatalln("Error loading schema file %s: %v", fpath, err)
 	}
-
-	// Create root node and load text styles
-	ctx.style = newTextStyleNode()
-	return LoadStyleSheet(ctx.cfg.StyleSheet, ctx.style)
+	defer f.Close()
+	
+	tokenParser := newParser()
+	tokenParser.parseReader(f)
+	if tokenParser.LastError != nil {
+		// Re-read file to get required line contents and dump parse error
+		var line string
+		lineReader := bufio.NewReader(f)
+		for l := 1 ; l <= tokenParser.Line ; l++ {
+			line, _ = lineReader.ReadString(byte('\n'))
+		}  
+		ctx.dumpLastError(tokenParser.Position, tokenParser.Position, 
+			tokenParser.Line, []string{line}, tokenParser.LastError)
+		return false
+	}
+	
+	parser := ctx.cfg.schema.parse(tokenParser)
+	if parser.LastError != nil {
+		// Re-assemble tokens and dump semantic error
+		lines, startPos, endPos := parser.LastError.cmd.reassembleLines(parser.LastError.index) 
+		ctx.dumpLastError(startPos, endPos, parser.LastError.cmd.getFirstToken().line, 
+			lines, parser.LastError.err)
+		return false
+	}
+	return true
 }
 
 // Rewinds state steps states back (cd -N)
 func (ctx *Context) rewindState(steps int) (err error) {
-	index := len(ctx.states) + steps - 1
+	index := len(ctx.states)-1 + steps
 	if index < 0 || index >= len(ctx.states) {
 		return fmt.Errorf("Invalid context index #%d", index)
 	}
@@ -259,6 +322,11 @@ func (ctx *Context) rewindStateRoot() (err error) {
 	}
 
 	return fmt.Errorf("Cannot find root state")
+}
+			
+func (ctx *Context) interpolateArgument(arg string) string {
+	// TODO: implement argument interpolation
+	return arg
 }
 
 //
@@ -291,10 +359,11 @@ func (cmd *historyCmd) Execute(ctx *Context, rq *Request) (err error) {
 	}
 	defer ioh.CloseOutput()
 
+	ioh.StartObject("history")
 	switch {
 	case options.Contexts:
 		// Contexts history
-		ioh.StartArray("contexts")
+		ioh.StartObject("contexts")
 		for index, state := range ctx.states {
 			ioh.StartObject("context")
 
@@ -309,7 +378,7 @@ func (cmd *historyCmd) Execute(ctx *Context, rq *Request) (err error) {
 
 			ioh.EndObject()
 		}
-		ioh.EndArray()
+		ioh.EndObject()
 	case options.Requests:
 		// Requests history
 		return fmt.Errorf("Not implemented")
@@ -317,6 +386,7 @@ func (cmd *historyCmd) Execute(ctx *Context, rq *Request) (err error) {
 		// Readline history
 		return fmt.Errorf("Not implemented")
 	}
+	ioh.EndObject()
 
 	return nil
 }

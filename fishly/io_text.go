@@ -1,168 +1,162 @@
 package fishly
 
 import (
-	"io"
 	"fmt"
-	
+	"bufio"
 	"bytes"
-	
-	"strings"
-	"strconv"
 )
 
 //
 // io_text -- text formatter for go which supports rich text formatting
+// in terminal
 //
 
-// text style is used to format text output
-type textStyle struct {
-	NewLine bool
-	
-	// Blocks start with indentantion and finish with a new line 
-	Block bool 
-	Indent int
-	
-	// left '<', right '>', or center '^'
-	Align string
-	
-	// Delimiter used if value with same tag appears
-	Delimiter string
-	NoDelimit bool
-	
-	// Starting column of output
-	Column int
-	
-	// if set -- specifies width of the field 
-	Width int
-	
-	// dumps table header
-	Header string
-	
-	// for rich terminals
-	TermStyle []string
+type textSchemaStyle struct {
+	TermStyle []string `opt:"ts|style,opt"`
 }
 
-type textStyleNode struct {
-	children map[string]*textStyleNode
+type textSchemaBlock struct {
+	textSchemaStyle
 	
-	style *textStyle
+	Tokens []string	`arg:"1,opt"`
 }
 
-func newTextStyleNode() (*textStyleNode) {
-	newNode := new(textStyleNode)
-	newNode.children = make(map[string]*textStyleNode)
+type textSchemaColumn struct {
+	textSchemaBlock
 	
-	return newNode
+	Left bool `opt:"<|left,opt"`
+	Right bool `opt:">|right,opt"`
+	Center bool `opt:"^|center,opt"`
+	
+	Width int `opt:"w|width,opt"`
+	Column int `opt:"at,opt"`
+	
+	Union bool `opt:"u|union,opt"`
+	NoSpace bool `opt:"nospace,opt"`
+	
+	Header string `opt:"hdr|header,opt"`
+}
+type textSchemaTable []textSchemaColumn
+type textSchemaBlocks []textSchemaBlock
+
+type textSchema struct {
+	tables map[schemaNodeId]textSchemaTable
+	blocks map[schemaNodeId]textSchemaBlocks
+	styles map[schemaNodeId]textSchemaStyle
 }
 
-func (node *textStyleNode) GetChild(name string) StyleSheetNode {
-	if child, ok := node.children[name] ; ok {
-		return child
-	}
-	return nil
-}
-	
-func (node *textStyleNode) CreateChild(name string) StyleSheetNode {
-	newNode := newTextStyleNode()
-	
-	node.children[name] = newNode
-	return newNode
-}
+var boldStyle *textSchemaStyle = &textSchemaStyle{TermStyle: []string{"bold"}}
 
-// iterator which builds style sheet path
-type textStyleIterator struct {
-	path []*textStyleNode
-	
-	rootNode *textStyleNode
-}
-
-func (node *textStyleNode) CreateStyle() interface{} {
-	node.style = new(textStyle)
-	node.style.Delimiter = " "
-	
-	return node.style
-}
-
-func (node *textStyleNode) newIterator() (*textStyleIterator) {
-	return &textStyleIterator{
-		rootNode: node,
+func newTextSchema() (*textSchema) {
+	return &textSchema {
+		tables: make(map[schemaNodeId]textSchemaTable),
+		blocks: make(map[schemaNodeId]textSchemaBlocks),
+		styles: make(map[schemaNodeId]textSchemaStyle),
 	}
 }
 
-func (iter *textStyleIterator) GetCurrent() StyleSheetNode {
-	if len(iter.path) > 0 {
-		return iter.path[len(iter.path)-1]
+func (schema *textSchema) HandleCommand(parser *schemaParser, node *schemaNode, cmd *cmdCommandTokenWalker) {
+	var textOpt struct {
+		Table bool `opt:"table,opt"`
+		Blocks bool `opt:"blocks,opt"`
+	}
+	if !parser.tryArgParse(cmd, &textOpt) {
+		return
 	}
 	
-	return iter.rootNode
-}
-
-func (iter *textStyleIterator) Enter(name string) {
-	node := iter.GetCurrent().(*textStyleNode)
-	
-	if child, ok := node.children[name] ; ok {
-		iter.path = append(iter.path, child)
-	}
-}
-
-func (iter *textStyleIterator) Back(index int) {
-	iter.path = iter.path[:index]
-}
-
-
-func (style *textStyle) parseHeader() []Token {
-	if len(style.Header) == 0 {
-		return nil
+	block := cmd.nextBlock()
+	if block == nil {
+		parser.LastError = cmd.newCommandError(fmt.Errorf("missing block for text node"))
+		return
 	}
 	
-	// Very simplistic parser which parses entries in header 
-	// in the following format:
-	//  _:"Description and words" arg:"ARG"
-	// It assembles entries with spaces (like _). Of course,
-	// it loses space symbols, and doesn't support escaping
-	
-	pieces := strings.Split(style.Header, " ")
-	header := make([]Token, 0)
-	
-	for i := 0 ; i < len(pieces) ; i++ {
-		colon := strings.IndexRune(pieces[i], ':')
-		if colon == -1 {
-			continue
-		}
-		
-		entry := Token{
-			Tag: pieces[i][:colon],
-			TokenType: Value, 
-			Text: pieces[i][colon+1:],
-		}
-		
-		// If header has quotes in it, gather pieces
-		if strings.Count(entry.Text, "\"") > 0 {
-			i++
-			buf := bytes.NewBufferString(entry.Text)
-			
-			for ; (strings.Count(buf.String(), "\"") % 2 != 0) && i < len(pieces) ; i++ {
-				buf.WriteRune(' ')
-				buf.WriteString(pieces[i])
+	switch {
+		case textOpt.Table:
+			var table textSchemaTable
+			table.parseTable(parser, block)
+			schema.tables[node.nodeId] = table
+		case textOpt.Blocks:
+			var blocks textSchemaBlocks
+			blocks.parseBlocks(parser, block)
+			schema.blocks[node.nodeId] = blocks
+		default:
+			styleCmd := block.nextCommand()
+			if block.nextCommand() != nil {
+				parser.LastError = cmd.newCommandError(fmt.Errorf("more than one command in text style node"))
+				return
+			}
+			if styleCmd.getFirstToken().token != "style" {
+				parser.LastError = cmd.newCommandError(fmt.Errorf("unexpected command in style node"))
+				return
 			}
 			
-			entry.Text, _ = strconv.Unquote(buf.String())
+			var style textSchemaStyle
+			parser.tryArgParse(styleCmd, &style)
+			schema.styles[node.nodeId] = style
+	}
+}
+
+func (table *textSchemaTable) parseTable(parser *schemaParser, block *cmdBlockTokenWalker) {
+	for parser.LastError == nil {
+		cmd := block.nextCommand()
+		if cmd == nil {
+			break
 		}
 		
-		header = append(header, entry)
+		token := cmd.getFirstToken()
+		switch token.token {
+			case "col":
+				var column textSchemaColumn
+				if parser.tryArgParse(cmd, &column) {
+					*table = append(*table, column)
+				}
+			default:
+				parser.LastError = cmd.newCommandError(fmt.Errorf("unexpected command in table context"))
+		}
 	}
-	
-	return header
+}
+
+
+func (blocks *textSchemaBlocks) parseBlocks(parser *schemaParser, block *cmdBlockTokenWalker) {
+	for parser.LastError == nil {
+		cmd := block.nextCommand()
+		if cmd == nil {
+			break
+		}
+		
+		token := cmd.getFirstToken()
+		switch token.token {
+			case "block":
+				var block textSchemaBlock
+				if parser.tryArgParse(cmd, &block) {
+					*blocks = append(*blocks, block)
+				}
+			default:
+				parser.LastError = cmd.newCommandError(fmt.Errorf("unexpected command in blocks context"))
+		}
+	}
+}
+
+func (block *textSchemaBlock) hasToken(tag string) bool {
+	if len(block.Tokens) == 0 {
+		return true
+	}
+	for _, btag := range block.Tokens {
+		if btag == tag {
+			return true
+		}
+	}
+	return false
 }
 
 // text formatter
 type textFormatter struct {
+	HandlerWithoutCompletion
+	HandlerWithoutOptions
+	
 	richText bool
-}
-
-type textFormatterOpt struct {
-	// Undocumented option used to raw dump of tokens 
-	Dump bool `opt:"dump,opt,undoc"` 
+	
+	schema *textSchema
 }
 
 // Colors -- compile term style map from several tables
@@ -199,262 +193,322 @@ func createTermStyleMap() map[string]int {
 }
 var termStyleMap = createTermStyleMap();
 
+type textFormatterPrinter interface {
+	handleValue(frq *textFormatterRq, value Token)
+	
+	commit(frq *textFormatterRq) 
+}
+
 type textFormatterRq struct {
-	richText bool
+	f *textFormatter
 	
-	w io.Writer
+	w *bufio.Writer
+	tokenPath *TokenPath
 	
-	tokenPath TokenPath
-	
-	// coordinates
 	indent int
-	row, col int
 	
-	blocks []string
-	header []Token
-	lastTag string
-	hasStyle bool
+	style *textSchemaStyle
+	printer textFormatterPrinter
+	
+	buf *bytes.Buffer
+	prefix *bytes.Buffer
+	suffix *bytes.Buffer
 }
 
-func (*textFormatter) NewOptions() interface{} {
-	return new(textFormatterOpt)
+type textFormatterBlockPrinter struct {
+	blocks textSchemaBlocks
+	blockIndex int
+	valueCount int
 }
 
-func (*textFormatter) Complete(ctx *Context, rq *CompleterRequest) {
+type textFormatterTablePrinter struct {
+	table textSchemaTable
+	top *tokenPathElement
+	
+	colIndex int
+	pos int
+	
+	// Current column style
+	style *textSchemaStyle
 }
 
 func (f *textFormatter) Run(ctx *Context, rq *IOFormatterRequest) {
-	options := rq.Options.(*textFormatterOpt)
 	defer rq.Close(nil)
 	
-	var stylePath StyleSheetPath
-	
-	styleIter := ctx.style.newIterator() 
-	
 	frq := &textFormatterRq {
-		richText: f.richText,
-		w: rq.Output,
-		blocks: make([]string, 0),	
+		f: f,
+		w: bufio.NewWriter(rq.Output),
+		
+		tokenPath: ctx.NewTokenPath(),
+		
+		buf: bytes.NewBuffer([]byte{}),
+		prefix: bytes.NewBuffer([]byte{}),
+		suffix: bytes.NewBuffer([]byte{}),
 	}
+	defer frq.w.Flush()
 	
-	for {
+	var minIndent int
+	
+	loop: for {
 		token := <- rq.Input
 		if token.TokenType == EOF {
 			return
 		}
 		
 		frq.tokenPath.UpdatePath(token)
-		haveNode := stylePath.Update(styleIter, &frq.tokenPath)
-		
-		// For debugging - redirect actual output to buffer & dump it later
-		var dumpBuffer *bytes.Buffer 
-		if options.Dump {
-			dumpBuffer = bytes.NewBuffer([]byte{})
-			frq.w = dumpBuffer 
+		if token.TokenType == ObjectStart || token.TokenType == ObjectEnd {
+			// Commit remaining tokens, reset current block and wait for the 
+			// first value to arrive to set correct block back
+			if frq.printer != nil {
+				frq.printer.commit(frq)
+			}
+			frq.printer = nil
+			continue
 		}
 		
-		// Not found style node, or it doesn't contain useful style -- no print
-		var styleNode *textStyleNode
-		if haveNode {
-			styleNode = styleIter.path[len(styleIter.path)-1]
-			
-			// In some cases style won't be created (if we found intermediate node)
-			if styleNode.style != nil {
-				frq.printToken(&token, styleNode)
+		frq.indent = len(frq.tokenPath.stack)-minIndent
+		frq.style = nil
+		
+		top := frq.tokenPath.getTopElement()
+		if top != nil {
+			frq.setStyle(token, top)
+		}
+		if frq.printer == nil {
+			// Setup printer based on top-level hierarchy level if possible 
+			for n := 1 ; ; n++ {
+				top = frq.tokenPath.getNthElement(n)
+				if top == nil {
+					continue loop
+				}
+				if frq.setPrinter(top) {
+					if minIndent == 0 {
+						minIndent, frq.indent = frq.indent, 0
+					}
+					break
+				}
 			}
 		}
 		
-		if options.Dump {
-			frq.debugDump(rq.Output, &token, strconv.Quote(dumpBuffer.String()), 
-					strings.Join(stylePath.Path, "."), styleNode)
+		if frq.printer != nil {
+			frq.printer.handleValue(frq, token)
 		}
 	}
 }
 
-func (rq *textFormatterRq) printToken(token *Token, styleNode *textStyleNode) {
-	// If that is the first time we found a non-empty entry, 
-	// dump its header first
-	if token.TokenType != ObjectEnd && len(rq.header) > 0 {
-		rq.printHeader(rq.header, styleNode)
-	}
-	rq.header = nil
+// Establishes printer -- a subclass which handles Value tokens
+func (frq *textFormatterRq) setPrinter(top *tokenPathElement) bool {
+	nodeId := top.node.nodeId
+	if blocks, ok := frq.f.schema.blocks[nodeId]; ok {
+		frq.printer = &textFormatterBlockPrinter{blocks: blocks}
+		return true
+	} else if table, ok := frq.f.schema.tables[nodeId]; ok {
+		frq.printer = &textFormatterTablePrinter{
+			table: table,
+			top: top,
+		}
+		return true
+	} 
+	return false
+}
+
+// Sets value- or var- specific style for a token, if possible. Otherwise,
+// style should be reset to nil so block-level or table-level style would be
+// used
+func (frq *textFormatterRq) setStyle(token Token, top *tokenPathElement) {
+	frq.style = nil
 	
-	style := styleNode.style
-	if style.Block {
-		if token.TokenType == ObjectStart || token.TokenType == ArrayStart {
-			rq.printBlock(style)
-		} else if token.TokenType == ObjectEnd {
-			rq.completeBlock(style)
+	var node *schemaNode
+	if top.valueNode != nil {
+		node = top.valueNode
+	} else if top.varNode != nil {
+		node = top.varNode
+	}
+	
+	if node != nil {
+		if style, ok := frq.f.schema.styles[node.nodeId] ; ok {
+			frq.style = &style
+		}
+	}
+}
+
+func (frq *textFormatterRq) setBuf(text, prefix, suffix string) {
+	frq.buf.WriteString(text)
+	frq.prefix.WriteString(prefix)
+	frq.suffix.WriteString(suffix)
+}
+
+func (frq *textFormatterRq) padPrefix(n int) {
+	for i := 0 ; i < n ; i++ {
+		frq.prefix.WriteByte(' ')
+	}
+}
+func (frq *textFormatterRq) padSuffix(n int) {
+	for i := 0 ; i < n ; i++ {
+		frq.suffix.WriteByte(' ')
+	}
+}
+
+func (frq *textFormatterRq) commitBuf() {
+	style := frq.style
+	if style == nil {
+		style = new(textSchemaStyle)
+	}
+	
+	frq.w.Write(frq.prefix.Bytes())
+	for _, termStyle := range style.TermStyle {
+		if seq, ok := termStyleMap[termStyle] ; ok {
+			fmt.Fprintf(frq.w, "%s[%dm", "\x1b", seq)
 		}
 	}
 	
-	if token.TokenType == Value {
-		// If we have specific value in token, customize style for it  
-		if valueNode, ok := styleNode.children["=" + token.Text]; ok {
-			style = valueNode.style
+	frq.w.Write(frq.buf.Bytes())
+	
+	if len(style.TermStyle) > 0 {
+		fmt.Fprintf(frq.w, "%s[%dm", "\x1b", 0)
+	}
+	frq.w.Write(frq.suffix.Bytes())
+	
+	frq.buf.Reset()
+	frq.prefix.Reset()
+	frq.suffix.Reset()
+}
+
+func (printer *textFormatterBlockPrinter) handleValue(frq *textFormatterRq, value Token) {
+	for printer.blockIndex < len(printer.blocks) {	
+		blocks := printer.blocks[printer.blockIndex]
+		if blocks.hasToken(value.Tag) {
+			// Setup prefix dependent on whether we're at the beginning of block
+			// or at 
+			if printer.valueCount > 0 {
+				frq.prefix.WriteRune(' ')
+			} else {
+				frq.padPrefix(frq.indent)
+			}
+			
+			if frq.style == nil {
+				frq.style = &blocks.textSchemaStyle
+			}
+			printer.valueCount++
+			frq.buf.WriteString(value.Text)
+			frq.commitBuf()
+			return
+		} 
+		
+		printer.blockIndex++
+		frq.w.WriteRune('\n')
+	}
+	
+	frq.setBuf(value.Text, fmt.Sprintf(" ?%s=", value.Tag), "? ")
+}
+
+func (printer *textFormatterBlockPrinter) commit(frq *textFormatterRq) {
+	frq.commitBuf()
+	frq.w.WriteRune('\n')
+}
+
+func (printer *textFormatterTablePrinter) handleValue(frq *textFormatterRq, value Token) {
+	for printer.colIndex < len(printer.table) {	
+		col := printer.table[printer.colIndex]
+		if frq.style != nil {
+			printer.style = frq.style
 		}
 		
-		rq.printValue(token, style, false)
-	}
-}
-
-func (rq *textFormatterRq) newline() {
-	rq.row++
-	rq.col = 0
-	io.WriteString(rq.w, "\n")
-	rq.writePadding(rq.indent)
-}
-
-func (rq *textFormatterRq) writePadding(n int) {
-	if n > 0 {
-		rq.col += n
-		io.WriteString(rq.w, strings.Repeat(" ", n))
-	}
-}
-
-func (rq *textFormatterRq) writeTermStyle(termStyle string) {
-	if seq, ok := termStyleMap[termStyle] ; ok {
-		fmt.Fprintf(rq.w, "%s[%dm", "\x1b", seq)
-		rq.hasStyle = true
-	}
-}
-
-func (rq *textFormatterRq) resetTermStyle() {
-	if rq.hasStyle {
-		fmt.Fprintf(rq.w, "%s[%dm", "\x1b", 0)
-		rq.hasStyle = false
-	}
-}
-
-func (rq *textFormatterRq) writeString(s string) {
-	if len(s) > 0 {
-		// TODO: support for hanging output
-		io.WriteString(rq.w, s)
-		rq.col += len(s)
-	}
-}
-
-// Returns token path of block that we are handling now
-func (rq *textFormatterRq) getCurrentBlock() string {
-	if len(rq.blocks) > 0 {
-		return rq.blocks[len(rq.blocks)-1]
+		// If we are still filling up current column, update buffer. If this is 
+		// new tag, commit current column and try next one
+		if col.hasToken(value.Tag) {
+			if frq.buf.Len() > 0 {
+				frq.buf.WriteRune(' ')				
+			}
+			frq.buf.WriteString(value.Text)
+			
+			// Dirty hack for one-line ls variant: it has -u option which allows to 
+			// immediately commit data and reset printer state
+			if col.Union {
+				printer.commitColumn(frq)
+				printer.style = nil
+			}
+			return
+		}
+		
+		printer.commitColumn(frq)
+		printer.colIndex++
 	}
 	
-	return ""
+	frq.setBuf(value.Text, fmt.Sprintf(" ?%s=", value.Tag), "? ")
 }
 
-// If new block starts, checks it and prints its header/indentation
-func (rq *textFormatterRq) printBlock(style *textStyle) {
-	// If it is a new block, update style
-	if style.Indent > 0 {
-		rq.indent += style.Indent
+func (printer *textFormatterTablePrinter) commitColumn(frq *textFormatterRq) {
+	col := printer.table[printer.colIndex]
+	if printer.style == nil {
+		printer.style = &col.textSchemaStyle
 	}
-		
-	tokenPath := rq.tokenPath.GetPath()
-	if tokenPath != rq.getCurrentBlock() {
-		if len(rq.blocks) > 0 {
-			rq.newline()
-		}
-		rq.blocks = append(rq.blocks, tokenPath)
+	printer.commit(frq)
+	
+	if !col.NoSpace {
+		frq.w.WriteRune(' ')
 	}
-
-	rq.lastTag = ""
-	rq.header = style.parseHeader()	
 }
 
-func (rq *textFormatterRq) completeBlock(style *textStyle) {
-	if rq.tokenPath.GetPath() != rq.getCurrentBlock() {
+func (printer *textFormatterTablePrinter) commit(frq *textFormatterRq) {
+	if printer.colIndex >= len(printer.table) {
+		frq.commitBuf()
+		frq.w.WriteRune('\n')
 		return
 	}
 	
-	rq.indent -= style.Indent	
-	rq.blocks = rq.blocks[:len(rq.blocks)-1] 
-}
-
-func (rq *textFormatterRq) printValue(token *Token, style *textStyle, forceBold bool) {
-	// Separate value from previous value
-	if style.NewLine {
-		rq.newline()
-	} else {
-		if len(rq.lastTag) > 0 && len(token.Tag) > 0 && !style.NoDelimit {
-			rq.writeString(style.Delimiter)
-		}
-	}
-	
-	// Calculate padding
-	var leftPad, rightPad int
-	if style.Width != 0 {
-		padding := style.Width - len(token.Text)
-		if padding > 0 {
-			switch style.Align {
-				case "<":
-					rightPad = padding
-				case ">":
-					leftPad = padding
-				case "^":
-					rightPad = padding / 2
-					leftPad = padding - padding/2
-				default:
-					// By default left-pad everything
-					rightPad = padding
-			}
-		}
-	}
-	if style.Column > rq.col {
-		leftPad += (style.Column - rq.col)
-	}
-	
-	// Set style & pad text
-	rq.writePadding(leftPad)
-	if rq.richText {
-		for _, termStyle := range style.TermStyle {
-			rq.writeTermStyle(termStyle)	
-		}
-		if forceBold {
-			rq.writeTermStyle("bold")
-		}
-	}
-	
-	rq.writeString(token.Text)
-	
-	// Reset style & clear style
-	rq.writePadding(rightPad)
-	rq.resetTermStyle()
-	
-	rq.lastTag = token.Tag
-}
-
-func (rq *textFormatterRq) printHeader(header []Token, styleNode *textStyleNode) {
-	for _, token := range header {
-		// Find appropriate style and print header using same style as tokens use
-		if node, ok := styleNode.children[token.Tag]; ok {
-			if node.style != nil {
-				// Use header's width as column width if it is not enough
-				if node.style.Width == 0 {
-					node.style.Width = len(token.Text)
-				}
-				
-				rq.printValue(&token, node.style, true)
-				continue
-			}
+	if printer.colIndex == 0 && printer.top.count == 0 {
+		// write table header
+		buf, style := frq.buf, printer.style
+		printer.style = boldStyle
+		
+		for colIndex, col := range printer.table {
+			frq.buf = bytes.NewBufferString(col.Header)
+			printer.writeColumn(colIndex, frq)
 		}
 		
-		var defaultStyle textStyle
-		rq.printValue(&token, &defaultStyle, true)
+		frq.buf, printer.style = buf, style
+		printer.colIndex = 0
 	}
+	
+	printer.writeColumn(printer.colIndex, frq)
 }
 
-func (rq *textFormatterRq) debugDump(w io.Writer, token *Token, 
-				text, stylePath string, styleNode *textStyleNode) {		
-	fmt.Fprintf(w, "%d tag:%-10s (last:%s) i:%d x:%d y:%d %s (%s)\n", token.TokenType, token.Tag,
-			rq.lastTag, rq.indent, rq.col, rq.row, text, token.Text)
-	fmt.Fprintf(w, " -> %s \n", rq.tokenPath.GetPath())
+func (printer *textFormatterTablePrinter) writeColumn(colIndex int, frq *textFormatterRq) {
+	col := printer.table[colIndex] 
 	
-	if styleNode != nil && styleNode.style != nil {
-		fmt.Fprintf(w, " -> style: %s (%v)\n", stylePath, styleNode.style)
+	// compute padding and pad
+	var extraLength int
+	if col.Column > 0 {
+		extraLength = col.Column - printer.pos
+		frq.padPrefix(extraLength)
+	} else if colIndex == 0 {
+		frq.w.WriteRune('\n')
+		frq.padPrefix(frq.indent)		
 	}
 	
-	if len(rq.blocks) > 0 {
-		fmt.Fprintf(w, " -> blocks: %d ... %s\n", len(rq.blocks), rq.getCurrentBlock())
+	length := len(frq.buf.String())
+	if col.Width > length && length > 0 {
+		padding := col.Width - length
+		if extraLength < 0 {
+			padding += extraLength
+		}
+		switch {
+			case col.Right:
+				frq.padPrefix(padding)
+			case col.Center:
+				frq.padPrefix(padding/2)
+				frq.padSuffix(padding-padding/2)
+			default:
+				frq.padSuffix(padding)
+		}
+	} 
+	
+	if colIndex == 0 {
+		printer.pos = 0
+	} else {
+		printer.pos += len(frq.prefix.String()) + length + len(frq.suffix.String())
 	}
+	
+	frq.style = printer.style
+	frq.commitBuf()
 }

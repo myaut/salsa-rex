@@ -1,0 +1,165 @@
+#
+# ls/select commands in non-repo context
+
+type repository struct {
+	help "Describes a single source repository"
+	var server string {
+		help "Name of the server from config file which provides repository"
+	}
+	var key string {
+		help "Unique repository id on server"
+	}
+	var name string {
+		help "Name of the source tree"
+	}
+	var version string {
+		help "Sources version"
+	}
+	var lang string {
+		help "Source language: C, CPP or JAVA"
+	} 
+}
+type repositories array repository {
+	text -table {
+		col -w 8 -hdr SERVER server
+		col -w 10 -hdr KEY key
+		col -w 30 name version 
+		col lang
+	}
+}
+
+command repository.ls repositories {
+	help "Shows list of available SALSA repositories"
+	opt -opt server -n "SERVER-NAME" {
+		help "If multiple salsasrv servers provide same repository, specifies which one to use"
+	}
+	opt -arg 1 {
+		help "Specifies token to filter out repositories"
+	}
+}
+
+command repository.select {
+	help "Selects SALSA repository"
+	opt -opt server -n "SERVER-NAME" {
+		help "If multiple salsasrv servers provide same repository, specifies which one to use"
+	}
+	opt -arg 1 -n 'NAME|KEY' {
+		help "Specifies name of repository or key"
+	}
+	opt -arg 2 {
+		help "Specifies version of repository to select"
+	}
+	opt -arg 3 {
+		help "Specifies language of repository to work with"
+	}
+}
+
+#
+# repofs commands
+#
+
+type fileList struct {
+	type file union {
+		type entry struct {
+			type entryType enum {
+				value "file"
+				value "dir" {
+					text { style -ts blue }
+				}
+				value "text"
+				value "source" {
+					text { style -ts green }
+				}
+			}
+		
+			var type entryType
+			var size int 
+			var name string
+		}
+	
+		var entry
+		var file string
+		var dir string {
+			text { style -ts blue }
+		}
+		var text string
+		var source string {
+			text { style -ts green }
+		}
+	}
+	type files array file {
+		text -table {
+			col -u file dir text source
+			col -w 6 type
+			col -w 8 size
+			col name
+		}
+	}
+	
+	var path string
+	var files
+}
+type fileLists array fileList {
+	text -blocks {
+		block -ts bold path
+	}
+}
+
+command repofs.ls fileLists {
+	help "List filesystem objects in repository"
+	
+	opt -opt long {
+		help "Enables long output format with objects of type entry"
+	}
+	opt -arg 1 {
+		help "Specifies path or path mask to be shown"
+	}
+}
+
+
+#
+# source contents
+# 
+
+type lineToken union {
+	var lineno int
+
+	var ident string
+	var keyword string {
+		text { style -ts bold }
+	}
+	var int string {
+		text { style -ts blue }
+	}
+	var float string {
+		text { style -ts blue }
+	}
+	var char string {
+		text { style -ts red }
+	}
+	var string string {
+		text { style -ts magenta }
+	}
+	var symbol string
+	var ppinclude string {
+		text { style -ts green }
+	}
+	var ppbegin string {
+		text { style -ts green }
+	}
+	var ppend string {
+		text { style -ts green }
+	}
+	default string
+}
+type line array lineToken
+type lines array line {
+	text -table {
+		col -w 5 lineno 
+		col -u -nospace
+	}
+}
+
+command repofs.cat lines {
+	help "Shows contents of source or text file"
+}

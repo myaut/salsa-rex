@@ -98,7 +98,7 @@ func (completer *Completer) Do(line []rune, pos int) (newLine [][]rune, length i
 		if token.startPos <= pos && pos <= token.endPos {
 			// TODO: prefix for complex arguments is determined differently
 			prefixLen := pos - token.startPos
-			if prefixLen > len(token.token) {
+			if prefixLen <= len(token.token) {
 				token.token = token.token[:prefixLen]	
 			}
 			return state.complete(token)
@@ -127,7 +127,7 @@ func (rq *completerRq) complete(token cmdToken) ([][]rune, int) {
 		}
 	} else {
 		optionDescriptors := generateOptionDescriptors(
-				rq.ctx.cfg.createOptionsForHandler(rq.handler))
+				rq.ctx.cfg.createOptionsForHandler(rq.handler), schemaCommand{})
 		if token.tokenType == tOption {
 			rq.completeOption(optionDescriptors)
 		} else {
@@ -178,12 +178,12 @@ func (rq *completerRq) completeArgument(optionDescriptors []optionDescriptor) {
 	// about order of arguments and user mistakes here. Also keep primary alias here
 	optionsWithArgs := make(map[string]string)
 	for _, od := range optionDescriptors {
-		if od.argIndex > 0 || od.kind == reflect.Bool {
-			// This option doesn't require argument
+		if od.argIndex > 0 || od.option.field.Type.Kind() == reflect.Bool {
+			// This option doesn't require argument (or not an option)
 			continue
 		} 
 		
-		for _, alias := range od.options {
+		for _, alias := range od.aliases {
 			optionsWithArgs[alias] = od.findLongestAlias()
 		}
 	}

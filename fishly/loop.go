@@ -6,42 +6,48 @@ import (
 	"log"
 	
 	"os"
-	"os/signal"
 		
 	"strings"
-	"net/url"
-	
-	"github.com/go-ini/ini"	
-	
-	// readline "gopkg.in/readline.v1"
-	readline "github.com/chzyer/readline"
+	"strconv"
 )
 
 //
-// loop -- main file in fishly which  glues readline library
-// and interprets inputs
+// loop -- main file in fishly which receives input lines from driver
+// which would be either readline (terminal) or HTTP client (web), 
+// starts cancel handler and interprets input command by command  
 //
 
 type ContextPromptFormatter func(ctx *Context) string
 
+type ReadlineDriver interface {
+	Close() error
+	
+	Stderr() io.Writer
+	SetPrompt(prompt string) 
+	
+	Readline() (string, error)
+}
+type ReadlineDriverFactory interface {
+	// Create readline driver or return error. May register sinks, etc.
+	Create(ctx *Context) (ReadlineDriver, error)	
+}
+
+type CancelHandler interface {
+	// Goroutines which wait for signal or reset handler
+	Wait()
+	Reset()
+}
+type CancelHandlerFactory interface {
+	// Establish handler
+	Create(ctx *Context, rq *Request) CancelHandler	
+}
+
 type UserConfig struct {
-	// As defined in readline.Config
-	HistoryFile string
-	HistoryLimit int
-	DisableAutoSaveHistory bool
-	VimMode bool
-	
-	// Program used as pager for long outputs. Should retain colorized outputs
-	Pager string
-	
 	// Command which would be automatically executed before running shell
 	AutoExec string
 	
-	// Help file paths
-	Help []string
-	
-	// StyleSheet files used for formatted text
-	StyleSheet []string
+	// Paths to schema files
+	Schema []string
 	
 	// URL used as initial context state
 	InitContextURL string
@@ -49,6 +55,10 @@ type UserConfig struct {
 
 type Config struct {
 	UserConfig
+	
+	// Sets default readline and cancel drivers
+	Readline ReadlineDriverFactory
+	Cancel CancelHandlerFactory
 	
 	// Sets program message of the day
 	MOTD string
@@ -67,245 +77,185 @@ type Config struct {
 	formatters []IOFormatter
 	sinks []IOSink
 	
-	// Default sink and formatters
+	// Default sinks and formatters
 	DefaultSink IOSink
 	DefaultPagerSink IOSink
 	DefaultRichTextFormatter IOFormatter
 	DefaultTextFormatter IOFormatter
+	
+	// Data schema of outputs
+	schema schemaRoot
 }
 
 func (cfg *Config) Run(extCtx ExternalContext) int {
 	// runs main command loop
 	ctx, err := newContext(cfg, extCtx)
-	if ctx.rl != nil {
-		defer ctx.rl.Close()	
-	}
 	if err != nil {
 		log.Fatalln(err)
 	}
+	defer ctx.rl.Close()
 	
-	log.Println(ctx.cfg.MOTD)
+	if len(ctx.cfg.MOTD) > 0 {
+		log.Println(ctx.cfg.MOTD)
+	}
 	ctx.runAutoExec()
 	
-	for ctx.running {
-		line, err := ctx.rl.Readline()
-		if err == readline.ErrInterrupt {
-			continue
-		} else if err == io.EOF || strings.TrimSpace(line) == "exit" {
-			break
+	for ctx.exitCode < 0 {
+		ctx.readNextCommand()
+		if ctx.exitCode >= 0 {
+			break	
 		}
 		
-		ctx.parseRequests(line)
-		for ctx.running && ctx.hasMoreRequests {
-			ctx.processRequest()
-		}
-		
+		ctx.processRequests()
 	}
 	
 	return ctx.exitCode
 }
 
-func newContext(cfg *Config, extCtx ExternalContext) (*Context, error) {
-	// Create and setup context object
-	ctx := new(Context)
-	ctx.External = extCtx
-	ctx.cfg = cfg
-	ctx.reload()
+// Reads next command from readline driver as a whole. If command is not yet 
+// parseable (unclosed block or quoted string), continues reading. If ^D is 
+// used, sets exit code to zero so loop can exit. If input was interrupted, 
+// sets cmdParser to nil. Otherwise leaves cmdParser field for further handling
+func (ctx *Context) readNextCommand() {
+	ctx.rl.SetPrompt(ctx.FullPrompt)
+	ctx.cmdParser = newParser()
 	
-	// Create readline instance
-	rl, err := readline.NewEx(&readline.Config{
-		HistoryFile: cfg.UserConfig.HistoryFile,
-		HistoryLimit: cfg.UserConfig.HistoryLimit,
-		DisableAutoSaveHistory: cfg.UserConfig.DisableAutoSaveHistory,
-		VimMode: cfg.UserConfig.VimMode,
-		AutoComplete: &Completer{
-			ctx: ctx,
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-	
-	ctx.rl = rl
-	ctx.running = true
-	ctx.cfg.registerBuiltinHandlers()
-	
-	// Some redirections 
-	log.SetOutput(ctx.rl.Stderr())
-	
-	// Create first root state
-	ctx.states = make([]ContextState, 0, 1)
-	ctx.PushState(true)
-	
-	if len(cfg.UserConfig.InitContextURL) > 0 {
-		ctxUrl, err := url.Parse(cfg.UserConfig.InitContextURL) 
+	for ctx.cmdParser.ExpectMore {
+		line, err := ctx.rl.Readline()
 		if err != nil {
-			return nil, err
+			if err.Error() == "Interrupt" {
+				ctx.cmdParser = nil
+				return
+			} else if err == io.EOF {
+				ctx.exitCode = 0
+				return
+			}
+			log.Fatalln(err)
 		}
-		err = ctx.PushStateFromURL(ctxUrl, true)
-		if err != nil {
-			return nil, err
+		
+		// Parse line and check if there is any input
+		ctx.cmdParser.parseLine(line)
+		if len(ctx.cmdParser.Tokens) == 0 {
+			break
 		}
+		
+		ctx.rl.SetPrompt("...")
 	}
-	ctx.tick()
-	
-	return ctx, nil
 }
 
-func (ctx *Context) loadHelp() (err error) {
-	helpFiles := make([]interface{}, len(ctx.cfg.Help))
-	for index, helpFile := range ctx.cfg.Help {
-		helpFiles[index] = helpFile
-	}
-	
-	ctx.help, err = ini.Load(helpFiles[0], helpFiles[1:]...)
-	return 
-}
-
-func (ctx *Context) parseRequests(line string) bool {
-	if len(line) == 0 {
-		return true
-	}
-	
+func (ctx *Context) parseAutoExec(line string) bool {
 	parser := newParser()
 	parser.parseLine(line)
 	if parser.LastError != nil {
-		ctx.dumpLastError(parser.Position, parser.Position, line, "Parser", parser.LastError)
+		ctx.dumpLastError(parser.Position, parser.Position, 0, []string{line}, 
+			parser.LastError)
 		return false
 	}
 	
-	// dumpTokens(parser.Tokens)
-	
-	ctx.cmdProcessor = ctx.newCommandProcessor(parser.Tokens)
-	ctx.hasMoreRequests = true
+	ctx.cmdParser = parser
 	return true
 }
 
-func (ctx *Context) processRequest() (err error) {
-	processor := ctx.cmdProcessor
-	rq := processor.nextCommand()
-	if processor.LastError != nil {
-		line, basePos := processor.assembleLine()
-		
-		ctx.dumpLastError(basePos, len(line)-1, line, 
-			"Syntax", processor.LastError)
-		ctx.hasMoreRequests = false
-		return
-	}
-	if rq == nil {
-		ctx.hasMoreRequests = false
-		return
+// Processes incoming arguments from parser if there are some
+func (ctx *Context) processRequests() (err *cmdProcessorError) {
+	if ctx.cmdParser == nil {
+		return		// nothing to process
 	}
 	
-	// Assign request id	
-	rq.Id = ctx.requestId
-	ctx.requestId++
-	
-	if rq.command == nil {
-		err = ctx.executeBuiltinRequest(rq) 
-	} else {
-		cmdErr := ctx.executeRequest(rq)
-		
-		// Handle command & output errors
-		if rq.ioh != nil && rq.ioh.err != nil {
-			err = rq.ioh.err
-			log.Printf("I/O handler exited with error: %s", err)
-		}
-		if cmdErr != nil {
-			err = cmdErr
-		}
-	}
-	
-	if err == nil {
-		// If context has changed, perform necessary updates in context
-		ctx.tick()
-	} else {
-		log.Printf("Command '%s' exited with error: %s", rq.commandName, err)
-	}
-	
-	// TODO: if '&&' is specified, we should rewind until the end of construct	
-	
-	return nil
+	return ctx.processBlock(ctx.cmdParser.createRootWalker())
 }
 
-func (ctx *Context) executeRequest(rq *Request) (error) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("Command caused a panic: %v", r)
+// Processes block of arguments
+func (ctx *Context) processBlock(block *cmdBlockTokenWalker) (err *cmdProcessorError) {
+	for err == nil && ctx.exitCode < 0 {
+		cmd := block.nextCommand()
+		if cmd == nil {
+			return
+		}
+		
+		var rq *Request
+		
+		commandName := cmd.getFirstToken().token  
+		switch commandName {
+			case "cd":
+				rq, err = ctx.tryProcessCD(cmd)
+				if rq == nil {
+					ctx.tick()
+				}
+			case "exit":
+				err = ctx.tryProcessExit(cmd)
+			case "schema":
+				// TODO: implement as subcommands reload, etc...
+				err = cmd.newCommandError(ctx.reloadSchema())
+			default:
+				rq, err = ctx.prepareCommandRequest(cmd)
+		}
+				
+		if rq != nil && err == nil {
+			err = cmd.newCommandError(ctx.processRequest(rq))
+		}
+		
+		if err != nil {
+			lines, startPos, endPos := cmd.reassembleLines(err.index)
+			ctx.dumpLastError(startPos, endPos, cmd.getFirstToken().line, lines, err.err)
+			return
+		}
+	}
+	return
+}
+
+// Tries to interpret command as builtin cd. If we fail to do so, fall back to 
+// normal type of request (external cd command)				
+func (ctx *Context) tryProcessCD(cmd *cmdCommandTokenWalker) (rq *Request, err *cmdProcessorError) {
+	args := cmd.getArguments()
+	if len(args) == 0 {			// "cd"
+		return nil, cmd.newCommandError(ctx.rewindStateRoot())
+	}
+	if len(args) == 1 && args[0].tokenType == tOption {
+		if len(args[0].token) == 0 {	// "cd -"
+			return nil, cmd.newArgumentError(ctx.rewindState(-1), 0)			
 		} 
-	}()
+		if steps, convErr := strconv.Atoi(args[0].token); convErr == nil {	// "cd -N"
+			return nil, cmd.newArgumentError(ctx.rewindState(-steps), 0)
+		} 
+	}
 	
-	// Setup ^C handler. 
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
-	go func(){
-	    sigNum := <- c
-	    if sigNum == os.Interrupt {
-	    	rq.Cancelled = true
-	    	ctx.External.Cancel(rq)
-	    	log.Print("INTERRUPTED")
-	    	
-	    	// Reset to default handler so following ^C will kill app 
-	    	signal.Reset(os.Interrupt)
-	    }
-	}()
-	defer func() {
-		close(c)
-		signal.Reset(os.Interrupt)
-	}()
-	
-	return rq.command.Execute(ctx, rq)
+	return ctx.prepareCommandRequest(cmd)
 }
 
-func (ctx *Context) executeBuiltinRequest(rq *Request) (error) {
-	switch rq.commandName {
-		case "cd":
-			if rq.Options != nil {
-				steps := rq.Options.(int)
-				return ctx.rewindState(steps)
-			}
-			
-			return ctx.rewindStateRoot()
-		case "_reload":
-			return ctx.reload()
-		case "exit":
-			if rq.Options != nil {
-				ctx.exitCode = rq.Options.(int)
-			}
-			ctx.running = false
-			return nil
+func (ctx *Context) tryProcessExit(cmd *cmdCommandTokenWalker) (err *cmdProcessorError) {
+	var exitArg struct {
+		ExitCode int `arg:"1,opt"`
 	}
-	return fmt.Errorf("Not implemented")
+	argParser := cmd.parseArgs(&exitArg, ctx.interpolateArgument)
+	if argParser.LastError != nil {
+		return cmd.newArgParserError(argParser)
+	}
+	
+	ctx.exitCode = exitArg.ExitCode
+	return
 }
 
 func (ctx *Context) runAutoExec() {
-	if !ctx.parseRequests(ctx.cfg.UserConfig.AutoExec) {
+	if !ctx.parseAutoExec(ctx.cfg.UserConfig.AutoExec) {
 		log.Fatalln("Parse error in autoexec command, exiting...")
 	}
 	
-	for ctx.running && ctx.hasMoreRequests {
-		err := ctx.processRequest()
-		if err != nil {
-			log.Fatalln("Error while executing in autoexec command, exiting...")
-		}
-		if !ctx.running {
-			os.Exit(ctx.exitCode)
-		}
+	err := ctx.processRequests()
+	if err != nil {
+		log.Fatalln("Error while executing in autoexec command, exiting...")
+	}
+	if ctx.exitCode >= 0 {
+		os.Exit(ctx.exitCode)
 	}	
 }
 
-func (ctx *Context) dumpLastError(startPos, endPos int, line string, errorClass string, err error) {
-	// Print syntax error & highlight failed token
-	fmt.Fprintf(ctx.rl.Stderr(), "   %s\n", line)
-	fmt.Fprintf(ctx.rl.Stderr(), "   %s%s %s error: %s\n", strings.Repeat(" ", startPos),
-					strings.Repeat("^", (endPos-startPos)+1), errorClass, err)	
+// Prints syntax error & highlights token which caused failure
+func (ctx *Context) dumpLastError(startPos, endPos, firstLineNo int, lines []string, err error) {
+	for lineOff, line := range lines {
+		fmt.Fprintf(ctx.rl.Stderr(), "%3d %s\n", firstLineNo+lineOff, line)
+	}
+	fmt.Fprintf(ctx.rl.Stderr(), "    %s%s error: %s\n", strings.Repeat(" ", startPos),
+					strings.Repeat("^", endPos-startPos), err)	
 }
 
-// For debugging
-func dumpTokens(tokens []cmdToken) {
-	for _, token := range tokens {
-		log.Printf("%d..%d #%d [%s] '%s'\n", token.startPos, token.endPos,
-					 token.argIndex, tokenTypeStrings[token.tokenType],
-					 token.token)			
-	}
-}

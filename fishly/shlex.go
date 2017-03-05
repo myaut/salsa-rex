@@ -158,9 +158,6 @@ type cmdTokenParser struct {
 	// Produced tokens
 	Tokens []cmdToken
 	
-	// Starting positions of lines
-	LinePositions []int
-	
 	// In case of error -- contains error
 	LastError error
 	Position int
@@ -193,9 +190,6 @@ type cmdTokenParser struct {
 	buf io.RuneScanner
 	hasMore bool
 	
-	// Accumulated line buffer if parseLine() were used more than once 
-	lineBuf *bytes.Buffer
-	
 	// last control rune and following runes in buffer from failed read (after EOF)
 	lastRune rune
 	lastBuf *bytes.Buffer
@@ -206,12 +200,12 @@ func newParser() (*cmdTokenParser) {
 	parser := cmdTokenParser {
 		// first token should be command
 		Tokens:  make([]cmdToken, 0),
-		LinePositions: []int{0},
 		
 		Position: 0,
 		Line: 1,
 		
-		hasMore: true,
+		hasMore: false,
+		ExpectMore: true,
 		
 		tokenType: tCommand,
 		allowOptions: false,
@@ -226,20 +220,10 @@ func newParser() (*cmdTokenParser) {
 // Parse text line by line. If current line is not finished and abrupts, 
 // parser will have ExpectMore set and reverted position
 func (parser *cmdTokenParser) parseLine(line string) {
-	if parser.lineBuf == nil {
-		if parser.buf != nil {
-			parser.LastError = fmt.Errorf("Line-by-line parsing and reader parsing are mutually exclusive")
-			return 
-		}
-		parser.lineBuf = bytes.NewBufferString(line)
+	if parser.lastBuf == nil &&  parser.lastRune == '\000' {
 		parser.parseFromScanner(bytes.NewBufferString(line))
-		
 		return
 	}
-	
-	// lineBuf accumulates all bytes of lines passed to parseLine
-	parser.lineBuf.WriteRune('\n')
-	parser.lineBuf.WriteString(line)
 	
 	// Assemble buffer from unread parts left by previous call to parseLine()
 	// and new line 
@@ -254,26 +238,20 @@ func (parser *cmdTokenParser) parseLine(line string) {
 	buf.WriteRune('\n')
 	buf.WriteString(line)
 	
+	parser.parseFromScanner(buf)
+}
+
+// Parse all text at once from reader (i.e., file)
+func (parser *cmdTokenParser) parseReader(rd io.Reader) {	
+	parser.parseFromScanner(bufio.NewReader(rd))
+}
+
+func (parser *cmdTokenParser) parseFromScanner(buf io.RuneScanner) {
 	// Reset parser state from previous parseLine() call
 	parser.ExpectMore = false
 	parser.hasMore = true
 	parser.LastError = nil
 	parser.Position = parser.lastPosition
-	
-	parser.parseFromScanner(buf)
-}
-
-// Parse all text at once from reader (i.e., file)
-func (parser *cmdTokenParser) parseReader(rd io.Reader) {
-	if parser.lineBuf != nil {
-		parser.LastError = fmt.Errorf("Line-by-line parsing and reader parsing are mutually exclusive")
-		return	
-	}
-	
-	parser.parseFromScanner(bufio.NewReader(rd))
-}
-
-func (parser *cmdTokenParser) parseFromScanner(buf io.RuneScanner) {
 	parser.buf = buf
 	
 	loop: for parser.hasMore && parser.LastError == nil {
@@ -293,7 +271,7 @@ func (parser *cmdTokenParser) parseFromScanner(buf io.RuneScanner) {
 		switch ch {
 			case '\n':
 				token = parser.readCharacterToken(tCommandSeparator, "\n")
-				parser.nextLine()
+				parser.Line++
 			case ';':
 				token = parser.readCharacterToken(tCommandSeparator, ";")
 			case '#':
@@ -301,6 +279,7 @@ func (parser *cmdTokenParser) parseFromScanner(buf io.RuneScanner) {
 				for parser.hasMore && ch != '\n' {
 					ch = parser.readRune(true)
 				}
+				parser.Line++
 				continue loop
 			case '\'':
 				token = parser.readToken(tSingleQuotedArgument, "'", false, false)
@@ -340,6 +319,7 @@ func (parser *cmdTokenParser) parseFromScanner(buf io.RuneScanner) {
 				
 				// Escape symbol followed by whitespace -- may be it is line delimiter?
 				if parser.checkSeparator(token) {
+					parser.Line++
 					continue loop
 				}
 		}
@@ -371,6 +351,7 @@ func (parser *cmdTokenParser) parseFromScanner(buf io.RuneScanner) {
 			case tRawArgument, tSingleQuotedArgument, tDoubleQuotedArgument:
 				// Find next token after argument. If they're merged, do not start 
 				// new argument (do not increase index)
+				token.argIndex = parser.argIndex
 				if parser.ignoreWhiteSpace(false) > 0 {
 					parser.argIndex++
 				}
@@ -387,11 +368,6 @@ func (parser *cmdTokenParser) parseFromScanner(buf io.RuneScanner) {
 	}
 }
 
-func (parser *cmdTokenParser) nextLine() {
-	parser.Line++
-	parser.LinePositions = append(parser.LinePositions, parser.Position) 
-}
-
 func (parser *cmdTokenParser) readToken(tokenType cmdTokenType, delimiters string, 
 										expectEOF, unreadRune bool) cmdToken {
 	var token cmdToken
@@ -406,7 +382,6 @@ func (parser *cmdTokenParser) readToken(tokenType cmdTokenType, delimiters strin
 	token.startPos = parser.Position
 	token.tokenType = tokenType
 	token.token = parser.readUntil(delimiters, expectEOF, unreadRune)
-	token.argIndex = parser.argIndex
 	token.endPos = parser.Position
 	if !unreadRune {
 		token.endPos--
@@ -445,6 +420,9 @@ func (parser *cmdTokenParser) ignoreWhiteSpace(ignoreNewLines bool) int {
 			break
 		}
 		
+		if ch == '\n' {
+			parser.Line++
+		}
 		whiteSpaceCount += 1
 	}
 	
@@ -711,7 +689,7 @@ func (parser *cmdTokenParser) shrinkStack() {
 
 // For debugging
 func (token cmdToken) String() string {
-	return fmt.Sprintf("{ token [%2d;%2d]@%d %8s %s }", token.startPos, 
+	return fmt.Sprintf("{ token [%2d;%2d]@%d %8s %s #%d }", token.startPos, 
 			token.endPos, token.line, tokenTypeStrings[token.tokenType],
-			strconv.Quote(token.token))
+			strconv.Quote(token.token), token.argIndex)
 }

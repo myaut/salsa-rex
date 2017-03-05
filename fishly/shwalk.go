@@ -178,9 +178,91 @@ func (parentWalker *cmdCommandTokenWalker) nextBlock() (*cmdBlockTokenWalker) {
 	return walker
 }
 
+// Reassembles command lines corresponding to a token and its command and 
+// returns their content and position at which updated token is located 
+// (indexing starts at last line location) 
+func (walker *cmdCommandTokenWalker) reassembleLines(index int) (lines []string, startPos, endPos int) {
+	lineBuf := bytes.NewBuffer([]byte{})
+	
+	startIndex := walker.command.command.start
+	prevToken := walker.tokens[startIndex]
+	currentLineNumber := 0
+	
+	// Find last index to show some context for tokeens 
+	lastIndex := index
+	for lastIndex <= walker.command.command.end {
+		lastToken := walker.tokens[lastIndex]
+		if lastToken.tokenType == tBlockBegin {
+			break
+		}
+		lastIndex++
+	}
+	
+	for tokenIndex := startIndex ; tokenIndex <= lastIndex ; tokenIndex++ {
+		if tokenIndex >= len(walker.tokens) {
+			break
+		}
+		
+		token := walker.tokens[tokenIndex]
+		if currentLineNumber > 0 && token.line > currentLineNumber {
+			lines = append(lines, lineBuf.String())
+			lineBuf.Reset()
+		}
+		currentLineNumber = token.line
+		
+		// Now convert token back to its original representation
+		if tokenIndex == index {		
+			startPos = lineBuf.Len()
+		}
+		
+		var prefix, suffix, text string
+		text = token.token
+		switch token.tokenType {
+			case tCommandSeparator:
+				text = ";"
+				fallthrough
+			case tBlockBegin, tBlockEnd:
+				prefix = " "
+				suffix = " "
+			case tOption:
+				prefix = " -"
+			case tSingleQuotedArgument, tDoubleQuotedArgument:
+				switch token.tokenType {
+					case tSingleQuotedArgument:
+						prefix = `'`
+					case tDoubleQuotedArgument:
+						prefix = `"`
+				}
+				suffix = prefix
+				fallthrough
+			case tRawArgument:
+				if prevToken.argIndex < token.argIndex {
+					prefix = " " + prefix
+				}
+			case tRedirection:
+				prefix = " | "
+			case tFileRedirection:
+				prefix = " > "
+			case tShellRedirection:
+				prefix = " ! "
+		}
+		
+		lineBuf.WriteString(prefix)
+		lineBuf.WriteString(text)
+		lineBuf.WriteString(suffix)
+		
+		if tokenIndex == index {
+			endPos = lineBuf.Len()
+		}	
+		prevToken = token
+	}
+	
+	lines = append(lines, lineBuf.String())
+	return 
+}
+
 func (walker *cmdCommandTokenWalker) parseArgs(optStruct interface{}, 
 			interpolate cmdOptionInterpolate) *cmdArgumentParser {
-	
 	parser := &cmdArgumentParser {
 		args: walker.getArguments(),
 		interpolate: interpolate,
@@ -190,10 +272,17 @@ func (walker *cmdCommandTokenWalker) parseArgs(optStruct interface{},
 		parser.LastError = fmt.Errorf("invalid type of options struct, pointer expected")
 		return parser
 	}
+	if reflect.ValueOf(optStruct).IsNil() {
+		if len(parser.args) == 0 {
+			return parser
+		}
+		parser.LastError = fmt.Errorf("arguments and options are not accepted in this context")
+		return parser
+	}
 	
 	optMode := true
 	
-	descriptor := parser.generateOptionStructDescriptor(optStruct)
+	descriptor := generateOptionStructDescriptor(optStruct)
 	loop: for parser.index = 0 ; parser.index < len(parser.args) ; parser.index++ {
 		token := parser.args[parser.index]
 		var opt *cmdOption
@@ -224,16 +313,21 @@ func (walker *cmdCommandTokenWalker) parseArgs(optStruct interface{},
 					parser.baseArgIndex++
 				}
 			case tRawArgument, tSingleQuotedArgument, tDoubleQuotedArgument:
-				optMode = false
-				argIndex := token.argIndex-parser.baseArgIndex
-				if argIndex < 0 {
-					parser.LastError = fmt.Errorf("invalid argument index %d", argIndex)
+				if len(descriptor.args) == 0 {
+					parser.LastError = fmt.Errorf("unexpected argument")
 					break loop
 				}
+			
+				optMode = false
+				argIndex := token.argIndex-parser.baseArgIndex
 				if argIndex >= len(descriptor.args) {
 					// Try to append to last argument (if it is slice), if it is not,
 					// we will fail on specified check
 					argIndex = len(descriptor.args)-1
+				}
+				if argIndex < 0 {
+					parser.LastError = fmt.Errorf("invalid argument index %d", argIndex)
+					break loop
 				}
 				opt = &descriptor.args[argIndex]
 				
@@ -301,13 +395,19 @@ func (parser *cmdArgumentParser) assembleArgument() string {
 	return buf.String()
 }
 
-func (parser *cmdArgumentParser) generateOptionStructDescriptor(
-			optStruct interface{}) cmdOptionStructDescriptor {
+func generateOptionStructDescriptor(optStruct interface{}) cmdOptionStructDescriptor {
 	var descriptor cmdOptionStructDescriptor
 	descriptor.optMap = make(map[string]int)
 	
 	optionsType := reflect.TypeOf(optStruct).Elem()
 	optionsVal := reflect.ValueOf(optStruct).Elem()
+	descriptor.generateOptionStructDescriptor(optionsType, optionsVal)
+	
+	return descriptor
+}
+
+func (descriptor *cmdOptionStructDescriptor) generateOptionStructDescriptor(
+			optionsType reflect.Type, optionsVal reflect.Value) {
 	
 	for fieldIdx := 0 ; fieldIdx < optionsType.NumField() ; fieldIdx++ {
 		var opt *cmdOption 
@@ -341,10 +441,11 @@ func (parser *cmdArgumentParser) generateOptionStructDescriptor(
 			}
 			opt := &descriptor.args[argIndex-1]
 			opt.flags = flags[1:]
+		} else {
+			// Recurse into embedded types
+			descriptor.generateOptionStructDescriptor(fieldOpt.field.Type, fieldOpt.fieldValue)
 		}
 	}
-	
-	return descriptor
 }
 
 // Checks that all necessary options were specified 

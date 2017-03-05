@@ -190,6 +190,7 @@ func assertExpectMore(t *testing.T, line string) (*cmdTokenParser) {
 }
 
 func TestExpectMore(t *testing.T) {
+	assertNotExpectMore(t, "cmd1")
 	assertNotExpectMore(t, "cmd1 arg1 { cmd2 }")
 	assertNotExpectMore(t, "cmd1 arg1 \\n ")
 	

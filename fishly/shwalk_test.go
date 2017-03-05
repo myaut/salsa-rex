@@ -4,6 +4,7 @@ import (
 	"reflect"
 	
 	"strings"
+	"strconv"
 		
 	"testing"
 )
@@ -274,3 +275,42 @@ func TestArgParserErrors(t *testing.T) {
 		assertError(t, argParser, "missing argument #1", 0)
 	}
 }
+
+func TestWalkerReassemble(t *testing.T) {
+	line := `cmd1|redir1	\
+		 -optR`
+	parser := newParser()
+	parser.parseLine(line)
+	if len(parser.Tokens) < 2 {
+		t.Errorf("Missing -opt4 token")
+		return
+	}
+	
+	walker := parser.createRootWalker()
+	cmd := walker.nextCommand()
+	
+	lines, s, e := cmd.reassembleLines(2)
+	if len(lines) != 2 {
+		t.Errorf("Expected 2 reassembled lines, got %d", len(lines))
+	} else {
+		expLines := []string{"cmd1 | redir1", " -optR"}
+		for l := 0 ; l < len(lines) ; l++ {
+			if lines[l] != expLines[l] {
+				t.Errorf("Unexpected reassembled line #%d", l)
+				t.Logf("%s (expected)", strconv.Quote(expLines[l]))
+				t.Logf("%s (got)", strconv.Quote(lines[l]))
+			}
+		}
+		
+		last := lines[len(lines)-1]
+		if s >= len(last) || e > len(last) || s > e {
+			t.Errorf("Unexpected last token range: [%d;%d]", s, e)
+		} else {
+			lastToken := last[s:e]
+			if lastToken != " -optR" {
+				t.Errorf("Unexpected last token: %s", strconv.Quote(last[s:e]))
+			}
+		}
+	}
+}
+

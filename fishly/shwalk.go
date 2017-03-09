@@ -441,7 +441,7 @@ func (descriptor *cmdOptionStructDescriptor) generateOptionStructDescriptor(
 			}
 			opt := &descriptor.args[argIndex-1]
 			opt.flags = flags[1:]
-		} else {
+		} else if fieldOpt.field.Type.Kind() == reflect.Struct {
 			// Recurse into embedded types
 			descriptor.generateOptionStructDescriptor(fieldOpt.field.Type, fieldOpt.fieldValue)
 		}

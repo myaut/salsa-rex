@@ -35,7 +35,6 @@ type hiSubSys struct {
 // HostInfo object which creates a tree of hostinfo
 type HIObject struct {
 	// Tree relationships
-	Parent *HIObject
 	Children map[string]*HIObject
 	
 	// Actual node (it is not filled in nexus node)
@@ -88,7 +87,6 @@ func GetNexus(id int, reprobe bool) (*HIObject, error) {
 // Insert root device into parent
 func (nexus *HIObject) Attach(name string, info HIObjectImpl) *HIObject {
 	obj := &HIObject {
-		Parent: nexus,
 		Children: make(map[string]*HIObject),
 		Object: info,
 	}

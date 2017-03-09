@@ -1,0 +1,51 @@
+#
+# 'hostinfo' schema
+
+type hiobject struct {
+	type hidisk struct {
+		var name string 
+		var type int
+		var size int
+		var bus string
+		var port string
+		var wwn string
+		var id string
+		var model string
+		var -list paths string
+	}
+	type process struct {
+		var user string
+		
+		var pid int
+		var ppid int
+		var execname string
+		var comm string
+	}
+	
+	var hidisk
+	var process
+	var -list children string
+}
+type hiobjects tree hiobject {
+	text -table {
+		group hidisk {
+			col -w 12 -hdr "NAME" name
+			col -w 5 -hdr "TYPE" type
+			col -w 12 -hdr "SIZE" size
+			col -hdr "BUS" bus port
+			col -at 32 -hdr "ID" wwn id model
+			
+			row paths
+		}
+		
+		group process {
+			col -w 8 -hdr "USER" user
+			col -w 6 -hdr "PID" pid
+			col -w 6 -hdr "PPID" ppid
+			col -w 16 -hdr "EXECNAME" execname
+			col -hdr "COMM" comm
+		}
+		
+		row children
+	}
+}

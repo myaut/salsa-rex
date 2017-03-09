@@ -16,6 +16,7 @@ const (
 	varFloat
 	
 	varArray
+	varTree
 	varEnum
 	varStruct
 	varUnion
@@ -30,6 +31,7 @@ var typeClassNames []string = []string{
 	"int",
 	"float",
 	"array",
+	"tree",
 	"enum",
 	"struct",
 	"union",
@@ -80,6 +82,10 @@ type schemaEnum struct {
 type schemaArray struct {
 	node *schemaNode
 	elementType *schemaNode
+	
+	// Trees are a special kind of array which has subvariable of
+	// the same type as array
+	isTree bool
 }
 
 type schemaCommand struct {
@@ -209,18 +215,16 @@ func (parser *schemaParser) parseType(cmd *cmdCommandTokenWalker) {
 	
 	// Parse real compound type (may require subblock)
 	switch typeClass {
-		case varArray:
-			parser.parseArray(node, cmd, typeOpt.ExtraType)
+		case varArray, varTree:
+			parser.parseArray(node, cmd, typeOpt.ExtraType, typeClass == varTree)
 		case varStruct:
-			parser.parseStruct(node, cmd, false)
+			parser.parseStruct(node, cmd, typeClass == varUnion)
 		case varEnum:
 			parser.parseEnum(node, cmd)
-		case varUnion:
-			parser.parseStruct(node, cmd, true)
 	}
 }
 
-func (parser *schemaParser) parseArray(node *schemaNode, cmd *cmdCommandTokenWalker, extraType string) {
+func (parser *schemaParser) parseArray(node *schemaNode, cmd *cmdCommandTokenWalker, extraType string, isTree bool) {
 	elementType := parser.findType(extraType)
 	if elementType == nil {
 		parser.LastError = cmd.newPositionalArgumentError(fmt.Errorf("Array element type '%s' is not defined", 
@@ -231,6 +235,7 @@ func (parser *schemaParser) parseArray(node *schemaNode, cmd *cmdCommandTokenWal
 	node.data = schemaArray {
 		node: node,
 		elementType: elementType,
+		isTree: isTree,
 	}
 	parser.parseNodeCommands(node, cmd.nextBlock())
 	return

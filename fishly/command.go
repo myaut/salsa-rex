@@ -45,6 +45,10 @@ type Command interface {
 	Execute(ctx *Context, rq *Request) error
 }
 
+// Mixin for command which is available globally 
+type GlobalCommand struct {
+}
+
 // Holds both last error and index of last processed token (for pretty
 // error messages)
 type cmdProcessorError struct {
@@ -68,6 +72,10 @@ var builtins = []string{
 	
 	// Reloads configuration files & etc.
 	"schema",
+}
+
+func (cmd *GlobalCommand) IsApplicable(ctx *Context) bool {
+	return true
 }
 
 // Checks if current token is a builtin and returns its string argument (if one exists)

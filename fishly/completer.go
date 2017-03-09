@@ -48,6 +48,14 @@ func (rq *CompleterRequest) AddOption(option string) {
 	rq.rq.tryAddOption(option)
 }
 
+// Adds multiple options
+func (rq *CompleterRequest) AddOptions(options... string) {
+	for _, option := range options {
+		rq.rq.tryAddOption(option)
+	}
+}
+
+
 // Returns deadline for auto-completer request
 func (rq *CompleterRequest) GetDeadline() time.Time {
 	return time.Now().Add(700 * time.Millisecond)

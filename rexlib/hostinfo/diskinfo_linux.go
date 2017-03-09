@@ -208,7 +208,6 @@ func (diObj *HIObject) procSlaves(nexus *HIObject) {
 		name := walker.GetName()
 		if slaveObj, ok := nexus.Children[name]; ok {
 			// Add link slave <-> parent obj
-			slaveObj.Parent = diObj
 			diObj.Children[name] = slaveObj
 			
 			trace(HITraceDisk, "Found slave %s for parent %s", name, di.Name)

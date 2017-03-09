@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"bufio"
 	"bytes"
+	"strings"
 )
 
 //
@@ -24,6 +25,8 @@ type textSchemaBlock struct {
 type textSchemaColumn struct {
 	textSchemaBlock
 	
+	group string
+	
 	Left bool `opt:"<|left,opt"`
 	Right bool `opt:">|right,opt"`
 	Center bool `opt:"^|center,opt"`
@@ -36,8 +39,12 @@ type textSchemaColumn struct {
 	
 	Header string `opt:"hdr|header,opt"`
 }
-type textSchemaTable []textSchemaColumn
+
 type textSchemaBlocks []textSchemaBlock
+type textSchemaTable struct {
+	cols []textSchemaColumn
+	rows textSchemaBlocks
+}
 
 type textSchema struct {
 	tables map[schemaNodeId]textSchemaTable
@@ -73,7 +80,7 @@ func (schema *textSchema) HandleCommand(parser *schemaParser, node *schemaNode, 
 	switch {
 		case textOpt.Table:
 			var table textSchemaTable
-			table.parseTable(parser, block)
+			table.parseTable(parser, block, "")
 			schema.tables[node.nodeId] = table
 		case textOpt.Blocks:
 			var blocks textSchemaBlocks
@@ -96,7 +103,7 @@ func (schema *textSchema) HandleCommand(parser *schemaParser, node *schemaNode, 
 	}
 }
 
-func (table *textSchemaTable) parseTable(parser *schemaParser, block *cmdBlockTokenWalker) {
+func (table *textSchemaTable) parseTable(parser *schemaParser, block *cmdBlockTokenWalker, group string) {
 	for parser.LastError == nil {
 		cmd := block.nextCommand()
 		if cmd == nil {
@@ -108,7 +115,23 @@ func (table *textSchemaTable) parseTable(parser *schemaParser, block *cmdBlockTo
 			case "col":
 				var column textSchemaColumn
 				if parser.tryArgParse(cmd, &column) {
-					*table = append(*table, column)
+					column.group = group
+					table.cols = append(table.cols, column)
+				}
+			case "row":
+				var block textSchemaBlock
+				if parser.tryArgParse(cmd, &block) {
+					table.rows = append(table.rows, block)
+				}
+			case "group":
+				var groupOpt struct {
+					Group string `arg:"1"`
+				}
+				if parser.tryArgParse(cmd, &groupOpt) {
+					groupBlock := cmd.nextBlock()
+					if groupBlock != nil {
+						table.parseTable(parser, groupBlock, groupOpt.Group)
+					}
 				}
 			default:
 				parser.LastError = cmd.newCommandError(fmt.Errorf("unexpected command in table context"))
@@ -147,6 +170,14 @@ func (block *textSchemaBlock) hasToken(tag string) bool {
 		}
 	}
 	return false
+}
+
+func (col *textSchemaColumn) matchTopType(top *tokenPathElement) bool {
+	if len(col.group) == 0 {
+		return true
+	}
+	
+	return top != nil && top.node != nil && top.node.name == col.group
 }
 
 // text formatter
@@ -230,6 +261,9 @@ type textFormatterTablePrinter struct {
 	
 	// Current column style
 	style *textSchemaStyle
+	
+	// Printer which is used for rows
+	blocks *textFormatterBlockPrinter
 }
 
 func (f *textFormatter) Run(ctx *Context, rq *IOFormatterRequest) {
@@ -305,6 +339,7 @@ func (frq *textFormatterRq) setPrinter(top *tokenPathElement) bool {
 		frq.printer = &textFormatterTablePrinter{
 			table: table,
 			top: top,
+			blocks: &textFormatterBlockPrinter{blocks: table.rows},
 		}
 		return true
 	} 
@@ -377,38 +412,49 @@ func (printer *textFormatterBlockPrinter) handleValue(frq *textFormatterRq, valu
 	for printer.blockIndex < len(printer.blocks) {	
 		blocks := printer.blocks[printer.blockIndex]
 		if blocks.hasToken(value.Tag) {
-			// Setup prefix dependent on whether we're at the beginning of block
-			// or at 
-			if printer.valueCount > 0 {
-				frq.prefix.WriteRune(' ')
-			} else {
-				frq.padPrefix(frq.indent)
-			}
-			
 			if frq.style == nil {
 				frq.style = &blocks.textSchemaStyle
 			}
+			
+			lines := strings.Split(value.Text, "\n")
+			for _, line := range lines { 
+				// Setup prefix dependent on whether we're at the beginning of block
+				if printer.valueCount == 0 {
+					frq.prefix.WriteRune('\n')
+					frq.padPrefix(frq.indent)
+				} else {
+					frq.prefix.WriteRune(' ')
+				}
+				
+				// Write value line by line (for multi-line values)
+				frq.buf.WriteString(line)
+				frq.commitBuf()
+			}
 			printer.valueCount++
-			frq.buf.WriteString(value.Text)
-			frq.commitBuf()
 			return
 		} 
 		
 		printer.blockIndex++
-		frq.w.WriteRune('\n')
 	}
 	
 	frq.setBuf(value.Text, fmt.Sprintf(" ?%s=", value.Tag), "? ")
+	frq.commitBuf()
 }
 
 func (printer *textFormatterBlockPrinter) commit(frq *textFormatterRq) {
 	frq.commitBuf()
-	frq.w.WriteRune('\n')
 }
 
 func (printer *textFormatterTablePrinter) handleValue(frq *textFormatterRq, value Token) {
-	for printer.colIndex < len(printer.table) {	
-		col := printer.table[printer.colIndex]
+	for printer.colIndex < len(printer.table.cols) {	
+		col := printer.table.cols[printer.colIndex]
+		
+		if !col.matchTopType(printer.top) && !col.matchTopType(frq.tokenPath.getTopElement()) {
+			// Ignore columns which belong to the wrong group
+			printer.colIndex++
+			continue
+		}
+		
 		if frq.style != nil {
 			printer.style = frq.style
 		}
@@ -416,6 +462,10 @@ func (printer *textFormatterTablePrinter) handleValue(frq *textFormatterRq, valu
 		// If we are still filling up current column, update buffer. If this is 
 		// new tag, commit current column and try next one
 		if col.hasToken(value.Tag) {
+			if printer.colIndex == 0 && printer.top.count == 0 {
+				printer.writeHeader(frq)		
+			}
+			
 			if frq.buf.Len() > 0 {
 				frq.buf.WriteRune(' ')				
 			}
@@ -434,47 +484,51 @@ func (printer *textFormatterTablePrinter) handleValue(frq *textFormatterRq, valu
 		printer.colIndex++
 	}
 	
-	frq.setBuf(value.Text, fmt.Sprintf(" ?%s=", value.Tag), "? ")
+	frq.indent += 2
+	printer.blocks.handleValue(frq, value)
 }
 
 func (printer *textFormatterTablePrinter) commitColumn(frq *textFormatterRq) {
-	col := printer.table[printer.colIndex]
+	col := printer.table.cols[printer.colIndex]
 	if printer.style == nil {
 		printer.style = &col.textSchemaStyle
-	}
-	printer.commit(frq)
-	
-	if !col.NoSpace {
-		frq.w.WriteRune(' ')
-	}
-}
-
-func (printer *textFormatterTablePrinter) commit(frq *textFormatterRq) {
-	if printer.colIndex >= len(printer.table) {
-		frq.commitBuf()
-		frq.w.WriteRune('\n')
-		return
-	}
-	
-	if printer.colIndex == 0 && printer.top.count == 0 {
-		// write table header
-		buf, style := frq.buf, printer.style
-		printer.style = boldStyle
-		
-		for colIndex, col := range printer.table {
-			frq.buf = bytes.NewBufferString(col.Header)
-			printer.writeColumn(colIndex, frq)
-		}
-		
-		frq.buf, printer.style = buf, style
-		printer.colIndex = 0
 	}
 	
 	printer.writeColumn(printer.colIndex, frq)
 }
 
+func (printer *textFormatterTablePrinter) commit(frq *textFormatterRq) {
+	if printer.colIndex < len(printer.table.cols) {
+		printer.writeColumn(printer.colIndex, frq)
+		frq.commitBuf()
+	}
+	
+	frq.w.WriteRune('\n')
+}
+
+func (printer *textFormatterTablePrinter) writeHeader(frq *textFormatterRq) {
+	// Save style
+	style := frq.style
+	hdrPrinter := &textFormatterTablePrinter{
+		table: printer.table,
+		style: boldStyle,
+	}
+	
+	for colIndex, col := range hdrPrinter.table.cols {
+		if !col.matchTopType(printer.top) && !col.matchTopType(frq.tokenPath.getTopElement()) {
+			continue
+		}
+		
+		frq.buf = bytes.NewBufferString(col.Header)
+		hdrPrinter.writeColumn(colIndex, frq)
+	}
+	frq.w.WriteRune('\n')
+	
+	frq.style = style
+}
+
 func (printer *textFormatterTablePrinter) writeColumn(colIndex int, frq *textFormatterRq) {
-	col := printer.table[colIndex] 
+	col := printer.table.cols[colIndex] 
 	
 	// compute padding and pad
 	var extraLength int
@@ -483,7 +537,7 @@ func (printer *textFormatterTablePrinter) writeColumn(colIndex int, frq *textFor
 		frq.padPrefix(extraLength)
 	} else if colIndex == 0 {
 		frq.w.WriteRune('\n')
-		frq.padPrefix(frq.indent)		
+		frq.padPrefix(frq.indent)
 	}
 	
 	length := len(frq.buf.String())
@@ -507,6 +561,9 @@ func (printer *textFormatterTablePrinter) writeColumn(colIndex int, frq *textFor
 		printer.pos = 0
 	} else {
 		printer.pos += len(frq.prefix.String()) + length + len(frq.suffix.String())
+	}
+	if !col.NoSpace {
+		frq.suffix.WriteRune(' ')
 	}
 	
 	frq.style = printer.style

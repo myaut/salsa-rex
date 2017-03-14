@@ -217,7 +217,7 @@ func (parser *schemaParser) parseType(cmd *cmdCommandTokenWalker) {
 	switch typeClass {
 		case varArray, varTree:
 			parser.parseArray(node, cmd, typeOpt.ExtraType, typeClass == varTree)
-		case varStruct:
+		case varStruct, varUnion:
 			parser.parseStruct(node, cmd, typeClass == varUnion)
 		case varEnum:
 			parser.parseEnum(node, cmd)

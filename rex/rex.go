@@ -7,8 +7,6 @@ import (
 	"net"
 	"net/rpc"
 	
-	"encoding/gob"
-	
 	"fmt"
 	"log"
 	
@@ -16,8 +14,6 @@ import (
 	
 	"flag"
 	"fishly"
-	
-	"rexlib/hostinfo"
 	
 	"github.com/go-ini/ini"
 )
@@ -76,10 +72,8 @@ func main() {
 				go cfg.serveOne(listener)
 			}
 			
-			conn := cfg.connectRexSocket()
-			
 			var ctx RexContext
-			ctx.client = rpc.NewClient(conn)
+			ctx.client = rpc.NewClient(cfg.connectRexSocket())
 			
 			ctx.startCLI(&cfg)
 	}
@@ -147,13 +141,15 @@ func (rexCfg *RexConfig) serve(listener *net.UnixListener) {
 }
 
 // Waits for main() goroutine to connect to us and serves it
-func (rexCfg *RexConfig) serveOne(listener *net.UnixListener) { 
-	conn, err := listener.Accept()
-	if err != nil {
-		log.Fatalln(err)
+func (rexCfg *RexConfig) serveOne(listener *net.UnixListener) {
+	for { 
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Fatalln(err)
+		}
+		
+		rpc.ServeConn(conn)
 	}
-	
-	rpc.ServeConn(conn)
 }
 
 func (rexCfg *RexConfig) connectRexSocket() (conn *net.UnixConn) {
@@ -170,7 +166,11 @@ func (rexCfg *RexConfig) connectRexSocket() (conn *net.UnixConn) {
 }
 
 func (rexCfg *RexConfig) setupRPC() {
-	gob.Register(&hostinfo.HIDiskInfo{})
-	gob.Register(&hostinfo.HIProcInfo{})
-	rpc.Register(&SRVHostInfo{})
+	srvHI := &SRVHostInfo{}
+	srvHI.initialize()
+	rpc.Register(srvHI)
+	
+	srvRex := &SRVRex{}
+	srvRex.initialize(rexCfg.DataDir)
+	rpc.Register(srvRex)
 }

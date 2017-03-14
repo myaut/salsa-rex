@@ -182,6 +182,11 @@ func (state *ContextState) URL() *url.URL {
 	return ctxUrl
 }
 
+func (state *ContextState) Reset(newPath... string) {
+	state.Path = newPath 
+	state.Variables = make(map[string]string)
+}
+
 // Creates new state from context url. Raises error if URL is invalid
 func (ctx *Context) PushStateFromURL(ctxUrl *url.URL, isRoot bool) error {
 	if ctxUrl.Scheme != "ctx" {

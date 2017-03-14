@@ -49,3 +49,20 @@ type hiobjects tree hiobject {
 		row children
 	}
 }
+
+#
+# Incidents schema
+
+type incident struct {
+	var name string
+	var state int
+	var description string
+}
+type incidents array incident {
+	text -table {
+		col -w 28 -hdr NAME name
+		col -w 8 -hdr STATE state
+		
+		row description
+	}
+}

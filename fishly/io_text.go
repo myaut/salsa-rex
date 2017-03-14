@@ -502,8 +502,6 @@ func (printer *textFormatterTablePrinter) commit(frq *textFormatterRq) {
 		printer.writeColumn(printer.colIndex, frq)
 		frq.commitBuf()
 	}
-	
-	frq.w.WriteRune('\n')
 }
 
 func (printer *textFormatterTablePrinter) writeHeader(frq *textFormatterRq) {
@@ -522,7 +520,6 @@ func (printer *textFormatterTablePrinter) writeHeader(frq *textFormatterRq) {
 		frq.buf = bytes.NewBufferString(col.Header)
 		hdrPrinter.writeColumn(colIndex, frq)
 	}
-	frq.w.WriteRune('\n')
 	
 	frq.style = style
 }

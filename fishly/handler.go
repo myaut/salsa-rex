@@ -182,7 +182,7 @@ func generateOptionDescriptors(optStruct interface{}, command schemaCommand) opt
 	options := make(optionDescriptorSlice, numOpts+numArgs)
 	for optIndex, opt := range descriptor.options {
 		options[optIndex].option = opt
-		if opt.hasFlag("count") || opt.field.Type.Kind() == reflect.Bool {
+		if !opt.hasFlag("count") && opt.field.Type.Kind() != reflect.Bool {
 			options[optIndex].argName = strings.ToUpper(opt.field.Name)
 		}
 	}

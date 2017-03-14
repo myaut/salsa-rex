@@ -7,15 +7,21 @@ import (
 	"rexlib/hostinfo"
 	
 	"fishly"
+	
+	"encoding/gob"
 )
 
 type SRVHostInfo struct{}
+
+func (srv *SRVHostInfo) initialize() {
+	gob.Register(&hostinfo.HIDiskInfo{})
+	gob.Register(&hostinfo.HIProcInfo{})
+}
 
 type HIGetNexusArgs struct {
 	SubSys int
 	Reprobe bool
 }
-
 func (srv *SRVHostInfo) HIGetNexus(args *HIGetNexusArgs, reply *hostinfo.HIObject) (err error) {
 	nexus, err := hostinfo.GetNexus(args.SubSys, args.Reprobe)
 	if nexus != nil {

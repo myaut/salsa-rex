@@ -14,16 +14,21 @@ type hiobject struct {
 		var -list paths string
 	}
 	type process struct {
-		var user string
-		
+		var uid int
 		var pid int
 		var ppid int
 		var execname string
 		var comm string
 	}
+	type thread struct {
+		var tid int
+		var start_time string
+		var name string
+	}
 	
 	var hidisk
 	var process
+	var thread
 	var -list children string
 }
 type hiobjects tree hiobject {
@@ -39,11 +44,17 @@ type hiobjects tree hiobject {
 		}
 		
 		group process {
-			col -w 8 -hdr "USER" user
+			col -w 8 -hdr "UID" uid
 			col -w 6 -hdr "PID" pid
 			col -w 6 -hdr "PPID" ppid
 			col -w 16 -hdr "EXECNAME" execname
 			col -hdr "COMM" comm
+		}
+		
+		group thread {
+			col -w 8 -hdr "TID" tid
+			col -w 16 -hdr "LIFETIME" lifetime
+			col -hdr "NAME" name
 		}
 		
 		row children

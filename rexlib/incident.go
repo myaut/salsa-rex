@@ -5,16 +5,20 @@ import (
 	"time"
 
 	"fmt"
+	"log"
 
 	"io/ioutil"
 	"path/filepath"
 	"strings"
 
 	"sync"
+	"sync/atomic"
 
 	"encoding/json"
 
 	"tsfile"
+
+	"rexlib/provider"
 )
 
 //
@@ -28,7 +32,7 @@ import (
 //
 
 const (
-	defaultIncidentTick = 100
+	defaultIncidentTickInterval = 100
 )
 
 type IncState int
@@ -42,11 +46,10 @@ const (
 type IncidentHandle struct {
 	incident *Incident
 
-	// TODO: Log
-	Trace *tsfile.TSFile
-	Tick  int
+	providerOutput provider.OutputHandle
 
-	Providers []Provider
+	tsfFile *os.File
+	logFile *os.File
 }
 
 type IncidentProvider struct {
@@ -54,16 +57,22 @@ type IncidentProvider struct {
 	StoppedAt time.Time `json:"stopped_at,omitempty"`
 	finalized bool
 
-	SchemaTags []tsfile.TSFPageTag
+	Name   string                      `json:"name"`
+	Config provider.ConfigurationState `json:"config"`
+
+	handle provider.Provider
 }
 
 type Incident struct {
+	// Protects running provider
+	mtx sync.Mutex
+
 	// Incident's name and path to incident directory
 	Name string `json:"name"`
 	path string
 
 	// Incident's scheduler ticks in milliseconds
-	Tick int `json:"tick"`
+	TickInterval int `json:"tick"`
 
 	// Description of incident
 	Description string `json:"descr,omitempty"`
@@ -72,7 +81,7 @@ type Incident struct {
 	StartedAt time.Time `json:"started_at"`
 	StoppedAt time.Time `json:"stopped_at,omitempty"`
 
-	Providers []IncidentProvider `json:"providers,omitempty"`
+	Providers []*IncidentProvider `json:"providers,omitempty"`
 }
 
 type IncidentDescriptor struct {
@@ -100,6 +109,8 @@ var Incidents incidentsState
 func Initialize(path string) {
 	incidentDir = path
 	Incidents.cache = make(map[string]*Incident)
+
+	Incidents.load()
 }
 
 func (state *incidentsState) add(incident *Incident) {
@@ -221,11 +232,15 @@ func (state *incidentsState) New(other *Incident) (incident *Incident, err error
 	incident = new(Incident)
 
 	// Pick incident subdir (by the time) and create it
-	timeStr := time.Now().Format(time.RFC3339)
+	baseName := other.Name
+	if len(baseName) == 0 {
+		baseName = time.Now().Format(time.RFC3339)
+	}
+
 	for suffix := 0; suffix < 10; suffix++ {
-		name := timeStr
+		name := baseName
 		if suffix > 0 {
-			name = fmt.Sprintf("%s.%d", timeStr, suffix)
+			name = fmt.Sprintf("%s.%d", baseName, suffix)
 		}
 		path := filepath.Join(incidentDir, name)
 
@@ -248,30 +263,25 @@ func (state *incidentsState) New(other *Incident) (incident *Incident, err error
 	// default-initialize it or copy
 	incident.CreatedAt = time.Now()
 
-	if other.IsZero() {
-		incident.Tick = defaultIncidentTick
+	incident.TickInterval = defaultIncidentTickInterval
+	err = incident.Merge(other)
+	if err == nil {
 		err = incident.save()
-	} else {
-		err = incident.Merge(other)
 	}
-
 	if err == nil {
 		state.add(incident)
 	}
 	return
 }
 
-func (incident *Incident) IsZero() bool {
-	// We can't send nils over rpc, so we should be able to send
-	// empty incident
-	return len(incident.Name) == 0
-}
-
 func (incident *Incident) Merge(other *Incident) error {
-	incident.Description = other.Description
-	incident.Tick = other.Tick
+	if len(other.Description) > 0 {
+		incident.Description = other.Description
+	}
 
-	// TODO: merge providers list
+	if other.TickInterval > 0 {
+		incident.TickInterval = other.TickInterval
+	}
 
 	return incident.save()
 }
@@ -288,20 +298,34 @@ func (incident *Incident) load() error {
 }
 
 // Saves current incident configuration
-func (incident *Incident) save() error {
-	path := filepath.Join(incident.path, "incident.json")
-	f, err := os.Create(path)
+func (incident *Incident) save() (err error) {
+	tempPath := filepath.Join(incident.path, "incident.json.tmp")
+	f, err := os.Create(tempPath)
 	if err != nil {
-		return err
+		return
 	}
 
 	encoder := json.NewEncoder(f)
 	encoder.SetIndent("  ", "  ")
-	return encoder.Encode(incident)
+	err = encoder.Encode(incident)
+	if err == nil {
+		err = f.Close()
+	}
+	if err == nil {
+		err = os.Rename(tempPath, filepath.Join(incident.path, "incident.json"))
+	}
+	return
 }
 
 // Returns incident state based on variables set
 func (incident *Incident) GetState() IncState {
+	incident.mtx.Lock()
+	defer incident.mtx.Unlock()
+
+	return incident.getStateNoLock()
+}
+
+func (incident *Incident) getStateNoLock() IncState {
 	switch {
 	case !incident.StoppedAt.IsZero():
 		return IncStopped
@@ -311,38 +335,54 @@ func (incident *Incident) GetState() IncState {
 	return IncCreated
 }
 
-func (incident *Incident) Start() error {
-	if incident.GetState() != IncCreated {
+func (incident *Incident) Start() (err error) {
+	incident.mtx.Lock()
+	defer incident.mtx.Unlock()
+
+	if incident.getStateNoLock() != IncCreated {
 		return fmt.Errorf("Incident already running or completed, cannot start")
 	}
 
-	tsf, err := os.Create(filepath.Join(incident.path, "trace.tsf"))
+	handle := new(IncidentHandle)
+	handle.incident = incident
+
+	handle.tsfFile, err = os.Create(filepath.Join(incident.path, "trace.tsf"))
 	if err != nil {
+		handle.Close()
 		return fmt.Errorf("Cannot create trace file: %v", err)
 	}
 
-	handle := new(IncidentHandle)
-	handle.Trace, err = tsfile.NewTSFile(tsf, 2)
+	handle.providerOutput.Trace, err = tsfile.NewTSFile(handle.tsfFile, 2)
 	if err != nil {
+		handle.Close()
 		return fmt.Errorf("Cannot create trace TS file: %v", err)
 	}
 
-	// TODO: open log
-	handle.incident = incident
-	go handle.run()
+	handle.logFile, err = os.OpenFile(filepath.Join(incident.path, "incident.log"),
+		os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		handle.Close()
+		return fmt.Errorf("Cannot create incident log: %v", err)
+	}
 
-	return nil
+	handle.providerOutput.Log = log.New(handle.logFile, "", log.Ltime|log.Lmicroseconds)
+
+	// If we succeeded, run the incident main routine
+	go handle.run()
+	return
 }
 
 func (incident *Incident) Stop() error {
-	if incident.GetState() != IncRunning {
+	incident.mtx.Lock()
+	defer incident.mtx.Unlock()
+
+	if incident.getStateNoLock() != IncRunning {
 		return fmt.Errorf("Incident is not running, cannot stop")
 	}
 
-	// Mark all providers as stopped. run() will be interrupted
-	// automatically
+	// Mark all providers as stopped. run() will be interrupted automatically
 	for provIndex, _ := range incident.Providers {
-		prov := &incident.Providers[provIndex]
+		prov := incident.Providers[provIndex]
 		if prov.StoppedAt.IsZero() {
 			prov.StoppedAt = time.Now()
 		}
@@ -351,67 +391,282 @@ func (incident *Incident) Stop() error {
 }
 
 func (handle *IncidentHandle) Close() {
+	handle.incident.mtx.Lock()
+	defer handle.incident.mtx.Unlock()
+
 	// Finalize all providers
 	for provIndex, _ := range handle.incident.Providers {
-		prov := &handle.incident.Providers[provIndex]
+		prov := handle.incident.Providers[provIndex]
 		if !prov.StartedAt.IsZero() && !prov.finalized {
-			handle.Providers[provIndex].Finalize(handle)
+			prov.handle.Finalize(&handle.providerOutput)
 			prov.finalized = true
 		}
 	}
 
-	// TODO: log error
-	handle.Trace.Close()
+	if handle.providerOutput.Trace != nil {
+		err := handle.providerOutput.Trace.Close()
+		if err != nil {
+			handle.providerOutput.Log.Printf("ERROR: Error while closing trace: %v", err)
+		}
+	}
 
-	// TODO: close log
+	if handle.tsfFile != nil {
+		err := handle.tsfFile.Close()
+		if err != nil {
+			handle.providerOutput.Log.Printf("ERROR: Error while closing tsfile: %v", err)
+		}
+	}
+
+	handle.providerOutput.Log = nil
+	handle.logFile.Close()
 }
 
 func (handle *IncidentHandle) run() {
+	var err error
 	incident := handle.incident
+	ilog := handle.providerOutput.Log
 
 	incident.StartedAt = time.Now()
-	incident.save()
+	err = incident.save()
+	if err != nil {
+		ilog.Println(err)
+	}
 
 	defer handle.Close()
 	defer incident.doStop()
 
-	for {
-		// Handle all providers if no more provers exit
-		var provCount int
-		for provIndex, _ := range incident.Providers {
-			prov := &incident.Providers[provIndex]
-			provHandle := handle.Providers[provIndex]
+	ticker := time.NewTicker(time.Duration(incident.TickInterval) * time.Millisecond)
+	defer ticker.Stop()
 
-			if prov.StartedAt.IsZero() {
-				// TODO: Initialize provider?
-				prov.StartedAt = time.Now()
-				provHandle.Prepare(handle)
-			}
-
-			if prov.StoppedAt.IsZero() {
-				provHandle.Collect(handle)
-				provCount++
-			} else if !prov.finalized {
-				provHandle.Finalize(handle)
-				prov.finalized = true
-			}
+	ilog.Println("Started incident provider loop")
+	for handle.providerOutput.Now = range ticker.C {
+		// Save incident properties (if providers were reinitialized)
+		err = incident.save()
+		if err != nil {
+			ilog.Println(err)
 		}
 
-		if provCount == 0 {
+		// Handle all providers if no more provers exit
+		if handle.runProviders() == 0 {
 			return
 		}
-
-		// Save incident properties (if providers were reinitialized)
-		incident.save()
-
-		// Sleep until next tick
-		handle.Tick++
-		nextTime := incident.StartedAt.Add(time.Duration(handle.Tick*incident.Tick) * time.Millisecond)
-		time.Sleep(nextTime.Sub(time.Now()))
 	}
+}
+
+func (handle *IncidentHandle) runProviders() (provCount int) {
+	incident := handle.incident
+	incident.mtx.Lock()
+	defer incident.mtx.Unlock()
+
+	for provIndex, _ := range incident.Providers {
+		prov := incident.Providers[provIndex]
+		if atomic.LoadUint32(&prov.Config.Committed) != 1 {
+			// Discard providers that are still configuring
+			continue
+		}
+
+		var err error
+		if prov.handle == nil {
+			// This provider has not yet spawned corresponding handle,
+			// time to configure it
+			err = incident.initializeProvider(prov)
+			if err != nil {
+				goto badProvider
+			}
+		}
+
+		if !prov.StoppedAt.IsZero() {
+			// Discard providers that are already stopped
+			if !prov.finalized {
+				prov.handle.Finalize(&handle.providerOutput)
+				prov.finalized = true
+			}
+			continue
+		}
+
+		// Start new providers
+		if prov.StartedAt.IsZero() {
+			prov.StartedAt = time.Now()
+			err = prov.handle.Prepare(&handle.providerOutput)
+			if err != nil {
+				goto badProvider
+			}
+		}
+
+		// Finally, gather some data
+		// XXX: we're doing this while holding the lock, how about moving
+		// this to separate loop?
+		prov.handle.Collect(&handle.providerOutput)
+		provCount++
+		continue
+
+	badProvider:
+		handle.providerOutput.Log.Println("ERROR: Error in provider #%d: %v",
+			provIndex, err)
+		prov.StoppedAt = prov.StartedAt
+		prov.finalized = true
+	}
+	return
 }
 
 func (incident *Incident) doStop() {
 	incident.StoppedAt = time.Now()
 	incident.save()
+}
+
+func (incident *Incident) initializeProvider(prov *IncidentProvider) (err error) {
+	// Re-initialize provider
+	prov.handle = incident.providerFactory(prov.Name)
+	if prov.handle == nil {
+		return fmt.Errorf("Unknown provider '%s'", prov.Name)
+	}
+
+	return incident.configureProvider(provider.ConfigureSetValue,
+		&prov.Config, prov)
+}
+
+func (incident *Incident) ConfigureProvider(action provider.ConfigurationAction,
+	state *provider.ConfigurationState) (err error) {
+
+	// Create or get already existing provider
+	var prov *IncidentProvider
+	if state.ProviderIndex < 0 {
+		if action != provider.ConfigureSetValue {
+			return fmt.Errorf("Provider is not exists")
+		}
+
+		prov, err = incident.createProvider(state)
+	} else {
+		prov, err = incident.getConfigurableProvider(state.ProviderIndex)
+	}
+
+	if err != nil {
+		return
+	}
+
+	incident.configureProvider(action, state, prov)
+
+	incident.save()
+	return
+}
+
+func (incident *Incident) configureProvider(action provider.ConfigurationAction,
+	state *provider.ConfigurationState, prov *IncidentProvider) (err error) {
+
+	steps := state.Configuration
+	if len(steps) > 1 {
+		steps, err = prov.reorderSteps(steps)
+		if err != nil {
+			return
+		}
+	}
+
+	// Now when steps are reordered, call ConfigureStep one at a time and
+	// update state with list of available options
+	for _, step := range steps {
+		if action == provider.ConfigureSetValue && step == nil {
+			return fmt.Errorf("Step was expected")
+		}
+
+		state.Configuration, err = prov.handle.Configure(action, step)
+		if err != nil {
+			break
+		}
+	}
+
+	// Update local (serialized) state with new steps
+	prov.Config.Configuration, err = prov.handle.Configure(
+		provider.ConfigureGetValues, nil)
+
+	atomic.StoreUint32(&prov.Config.Committed, state.Committed)
+	return nil
+}
+
+func (incident *Incident) createProvider(state *provider.ConfigurationState) (*IncidentProvider, error) {
+	// Pop first configuration parameter as provider name
+	if len(state.Configuration) == 0 || len(state.Configuration[0].Values) != 1 {
+		return nil, fmt.Errorf("Provider creation is requested, but no provider name given")
+	}
+
+	prov := new(IncidentProvider)
+
+	// Create an implementation object or fail
+	prov.Name = state.Configuration[0].Values[0]
+	prov.handle = incident.providerFactory(prov.Name)
+	if prov.handle == nil {
+		return nil, fmt.Errorf("Unknown provider '%s'", prov.Name)
+	}
+
+	// Add provider and update state
+	state.Configuration = state.Configuration[1:]
+
+	incident.mtx.Lock()
+	defer incident.mtx.Unlock()
+
+	state.ProviderIndex = len(incident.Providers)
+	incident.Providers = append(incident.Providers, prov)
+
+	return prov, nil
+}
+
+func (incident *Incident) getConfigurableProvider(index int) (*IncidentProvider, error) {
+	incident.mtx.Lock()
+	defer incident.mtx.Unlock()
+
+	if len(incident.Providers) <= index {
+		return nil, fmt.Errorf("Invalid provider index %d was given", index)
+	}
+
+	prov := incident.Providers[index]
+	if atomic.LoadUint32(&prov.Config.Committed) != 0 {
+		return nil, fmt.Errorf("Can't configure provider that is already committed")
+	}
+
+	return prov, nil
+}
+
+func (prov *IncidentProvider) reorderSteps(steps []*provider.ConfigurationStep) (
+	[]*provider.ConfigurationStep, error) {
+
+	// Get correct order of steps
+	guide, err := prov.handle.Configure(provider.ConfigureGetOptions, nil)
+	if err != nil {
+		return steps, err
+	}
+
+	// Reorder steps according to a guideline coming from provider. I.e. if user
+	// gives us tid=2 pid=1, we might want to reorder it to pid=1 tid=2 because
+	// provider wants us to set thread id after we set process id
+
+	indices := make([]int, len(steps))
+	for i, _ := range steps {
+		indices[i] = -1
+	}
+
+	var j int
+	for _, guideStep := range guide {
+		for i, step := range steps {
+			if guideStep.CompareStepName(step) {
+				if indices[i] != -1 {
+					return nil, fmt.Errorf("Invalid step %s:%s: it matches to more than one step",
+						step.NameSpace, step.Name)
+				}
+
+				indices[i] = j
+				j++
+			}
+		}
+	}
+
+	newSteps := make([]*provider.ConfigurationStep, len(steps))
+	for i, j := range indices {
+		if j == -1 {
+			return steps, fmt.Errorf("Invalid step %s:%s: provider is not aware of it",
+				steps[i].NameSpace, steps[i].Name)
+		}
+
+		newSteps[j] = steps[i]
+	}
+
+	return newSteps, nil
 }

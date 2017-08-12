@@ -67,13 +67,13 @@ func (pfr *ProcFileReader) ReadString(expectedKey string) string {
 	}
 }
 
-func (pfr *ProcFileReader) ReadInteger(expectedKey string, base, bitSize int) uint64 {
+func (pfr *ProcFileReader) ReadInteger(expectedKey string, base, bitSize int) int64 {
 	value := pfr.ReadString(expectedKey)
 	if pfr.lastError != nil {
 		return 0
 	}
 
-	ival, err := strconv.ParseUint(value, base, bitSize)
+	ival, err := strconv.ParseInt(value, base, bitSize)
 	if err != nil {
 		pfr.setLastError(err)
 	}
@@ -128,8 +128,16 @@ func (prober *HIProcessProber) Probe(nexus *HIObject) error {
 			continue
 		}
 
-		pi := new(HIProcInfo)
+		var pi *HIProcInfo = new(HIProcInfo)
+		var prevPi *HIProcInfo
+		if procObj, ok := nexus.Children[pidStr]; ok {
+			prevPi = procObj.Object.(*HIProcInfo)
+		}
 		basePath := filepath.Join(procPath, pidStr)
+
+		// Read tasks (threads) to update process lifetime
+		obj := nexus.Attach(pidStr, pi)
+		prober.readTaskList(basePath, pi, obj)
 
 		err = prober.readStatus(basePath, pi)
 		if err != nil {
@@ -140,11 +148,18 @@ func (prober *HIProcessProber) Probe(nexus *HIObject) error {
 		pi.readCommandLine(basePath)
 		pi.readIOStat(basePath)
 
-		obj := nexus.Attach(pidStr, pi)
-		prober.readTaskList(basePath, obj)
+		if prevPi != nil {
+			pi.normalizeStats(prevPi)
+		}
 	}
 
 	return nil
+}
+
+func (prober *HIProcessProber) UpdateStats(nexus *HIObject) error {
+	// process tree is highly volatile, so we're constantly re-probing it
+	// instead of simply updating statistics
+	return prober.Probe(nexus)
 }
 
 // Reads status file in format key:\s+value
@@ -186,15 +201,18 @@ func (pi *HIProcInfo) readIOStat(basePath string) {
 	if err != nil {
 		return
 	}
+	defer file.Close()
 
 	pfr := ProcFileReader{reader: bufio.NewReader(file)}
 
-	pi.RChar = pfr.ReadInteger("rchar", 10, 64)
-	pi.WChar = pfr.ReadInteger("wchar", 10, 64)
+	pi.rChar = pfr.ReadInteger("rchar", 10, 64)
+	pi.wChar = pfr.ReadInteger("wchar", 10, 64)
 }
 
 // Reads list of threads associated with this process
-func (prober *HIProcessProber) readTaskList(basePath string, obj *HIObject) {
+func (prober *HIProcessProber) readTaskList(basePath string,
+	pi *HIProcInfo, obj *HIObject) {
+
 	basePath = filepath.Join(basePath, "task")
 	taskDirs, err := ioutil.ReadDir(basePath)
 	if err != nil {
@@ -214,14 +232,19 @@ func (prober *HIProcessProber) readTaskList(basePath string, obj *HIObject) {
 			trace(HITraceProc, "Error reading %s/status: %v", taskPath, err)
 			continue
 		}
+		var ui64, startTime, utime, stime uint64
+		var i64 int64
 
 		tfr := ProcFileReader{reader: bufio.NewReader(file)}
 
 		ti := new(HIThreadInfo)
+
 		ti.TID = uint32(tid)
 		ti.Name = tfr.ReadString("Name")
-		ti.VCS = tfr.ReadInteger("voluntary_ctxt_switches", 10, 64)
-		ti.IVCS = tfr.ReadInteger("nonvoluntary_ctxt_switches", 10, 64)
+		ti.vcs = tfr.ReadInteger("voluntary_ctxt_switches", 10, 64)
+		ti.ivcs = tfr.ReadInteger("nonvoluntary_ctxt_switches", 10, 64)
+
+		file.Close()
 
 		file, err = os.Open(filepath.Join(taskPath, "stat"))
 		if err != nil {
@@ -233,10 +256,6 @@ func (prober *HIProcessProber) readTaskList(basePath string, obj *HIObject) {
 		buf := bufio.NewReader(file)
 		buf.Discard(len(tidStr) + len(" (") + len(ti.Name) + len(")"))
 
-		var startTime, utime, stime uint64
-		var i64 int64
-		var ui64 uint64
-
 		_, err = fmt.Fscanf(buf, " %c", &ti.State)
 		if err != nil {
 			trace(HITraceProc, "Error in Fscanf(%s/stat:state): %v", taskPath, err)
@@ -247,7 +266,7 @@ func (prober *HIProcessProber) readTaskList(basePath string, obj *HIObject) {
 			// ppid  pgrp  sess  tty#  tpgid flags
 			&i64, &i64, &i64, &i64, &i64, &ui64,
 			// minflt  	  c* 	majflt  	   c*	  utime   stime
-			&ti.MinFault, &ui64, &ti.MajFault, &ui64, &utime, &stime,
+			&ti.minFault, &ui64, &ti.majFault, &ui64, &utime, &stime,
 			// c[us]time  prio  nice  nt    itrv  starttime
 			&ui64, &ui64, &i64, &i64, &i64, &i64, &startTime,
 		)
@@ -256,12 +275,22 @@ func (prober *HIProcessProber) readTaskList(basePath string, obj *HIObject) {
 			continue
 		}
 
+		// Compute new lifetime of the thread in time.Duration
 		threadLifetime := jiffiesToDuration(startTime)
+		if threadLifetime > pi.Lifetime {
+			pi.Lifetime = threadLifetime
+		}
 		ti.Lifetime = uptime - threadLifetime
-		ti.STime = jiffiesToDuration(stime)
-		ti.UTime = jiffiesToDuration(utime)
+
+		ti.uTime = jiffiesToDuration(utime)
+		ti.sTime = jiffiesToDuration(stime)
+
+		if threadObj, ok := obj.Children[tidStr]; ok {
+			ti.normalizeStats(threadObj.Object.(*HIThreadInfo))
+		}
 
 		obj.Attach(tidStr, ti)
+		file.Close()
 	}
 }
 
@@ -272,6 +301,8 @@ func (prober *HIProcessProber) readUptime() time.Duration {
 	if err == nil {
 		_, err = fmt.Fscan(file, &uptimeF)
 	}
+	file.Close()
+
 	if err != nil {
 		trace(HITraceProc, "Error reading /proc/uptime: %v", err)
 		return time.Second
@@ -286,6 +317,7 @@ func (pi *HIProcInfo) readCommandLine(pidStr string) {
 	if err != nil {
 		return
 	}
+	defer file.Close()
 
 	var args []string
 	buf := bufio.NewReader(file)

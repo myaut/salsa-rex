@@ -25,7 +25,8 @@ const (
 	hissError
 )
 
-const collectionInterval time.Duration = 50 * time.Millisecond
+const collectionInterval time.Duration = 200 * time.Millisecond
+const statsCollectionInterval time.Duration = 10 * time.Millisecond
 
 type HIObjectImpl interface {
 }
@@ -33,6 +34,9 @@ type HIObjectImpl interface {
 type HISubsystemImpl interface {
 	// Probes node and fills up nexus with children
 	Probe(nexus *HIObject) error
+
+	// Updates statistics without re-probing data
+	UpdateStats(nexus *HIObject) error
 }
 
 // Nexus node wrapper
@@ -41,12 +45,12 @@ type hiSubSys struct {
 
 	Nexus HIObject
 
+	mu   sync.Mutex
 	impl HISubsystemImpl
 
-	state          int
-	lastCollection time.Time
-
-	mu sync.Mutex
+	state               int
+	lastCollection      time.Time
+	lastStatsCollection time.Time
 }
 
 // HostInfo object which creates a tree of hostinfo
@@ -66,7 +70,7 @@ var subsystems []hiSubSys = []hiSubSys{
 
 // Probes subsystem (if necessary) and returns nexus node. If devices
 // already probed and reprobe is set to false, returns previous list
-func GetNexus(id int, reprobe bool) (*HIObject, error) {
+func GetNexus(id int, reprobe bool, stats bool) (*HIObject, error) {
 	if id >= len(subsystems) {
 		return nil, fmt.Errorf("Unknown subsystem #%d", id)
 	}
@@ -86,13 +90,6 @@ func GetNexus(id int, reprobe bool) (*HIObject, error) {
 	if subsys.state == hissNotProbed || reprobe {
 		// Initialize nexus node and children
 		subsys.Nexus.Children = make(map[string]*HIObject)
-		switch id {
-		case HIProc:
-			subsys.Nexus.Object = new(HIProcInfo)
-		case HIDisk:
-			subsys.Nexus.Object = new(HIDiskInfo)
-		}
-
 		err := subsys.impl.Probe(nexus)
 		if err != nil {
 			subsys.state = hissError
@@ -101,6 +98,11 @@ func GetNexus(id int, reprobe bool) (*HIObject, error) {
 
 		subsys.state = hissOK
 		subsys.lastCollection = time.Now()
+		subsys.lastStatsCollection = subsys.lastCollection
+	}
+	if stats && subsys.lastStatsCollection.Before(time.Now().Add(-statsCollectionInterval)) {
+		subsys.impl.UpdateStats(nexus)
+		subsys.lastStatsCollection = time.Now()
 	}
 
 	// hissOK
@@ -126,7 +128,6 @@ type HIProcInfo struct {
 	// This node is not an actual process, but a group of processes
 	// which might be PGID-based, CGroup-based. PPIDs are not considered as
 	// groups
-	// TODO: Group string
 
 	// PID as string is used as child name
 	PID  uint32
@@ -143,9 +144,17 @@ type HIProcInfo struct {
 	// TODO: support for mapping
 	// TODO: support for open files & working/root directories
 
-	// Process statistics
-	VSZ, RSS     uint64
-	RChar, WChar uint64
+	// Virtual memory statistics (current)
+	VSZ, RSS uint64
+	// Allocated/freed bytes physically per second
+	VAllocs, PAllocs int64
+	// read/write bytes per second
+	RChar, WChar int64
+
+	Lifetime time.Duration
+
+	// Actual absolute stats
+	rChar, wChar int64
 }
 
 type HIThreadInfo struct {
@@ -154,11 +163,17 @@ type HIThreadInfo struct {
 
 	State rune
 
-	VCS, IVCS          uint64
-	MinFault, MajFault uint64
+	// Relative stats (per second, since last gather interval)
+	VCS, IVCS          int64
+	MinFault, MajFault int64
+	UTime, STime       time.Duration
 
-	UTime, STime time.Duration
-	Lifetime     time.Duration
+	Lifetime time.Duration
+
+	// Absolute stats (since thread start)
+	vcs, ivcs          int64
+	minFault, majFault int64
+	uTime, sTime       time.Duration
 }
 
 // DiskInfo types

@@ -223,3 +223,8 @@ func (diObj *HIObject) procSlaves(nexus *HIObject) {
 		}
 	}
 }
+
+func (prober *HIDiskProber) UpdateStats(nexus *HIObject) error {
+	// TODO implement me
+	return nil
+}

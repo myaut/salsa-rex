@@ -1,17 +1,16 @@
 package fishly
 
 import (
-	"fmt"
 	"bufio"
+	"fmt"
 	"log"
-	
+
 	"strings"
 
 	"os"
 
 	"net/url"
 	"path/filepath"
-	
 )
 
 //
@@ -62,7 +61,7 @@ type Context struct {
 	// Current prompt set by external context (contains context-
 	// specific information such as formatted path). FullPrompt
 	// contains full text to be used by readline driver
-	Prompt string
+	Prompt     string
 	FullPrompt string
 
 	// Context states history. first is current state,
@@ -74,13 +73,13 @@ type Context struct {
 
 	// Customizable ReadLine driver
 	rl ReadlineDriver
-	
+
 	// Commands available in the current state
 	availableCommands handlerTable
 
 	// Requests state
 	cmdParser *cmdTokenParser
-	requestId       int
+	requestId int
 
 	// Exit code. While context is running, set to -1
 	exitCode int
@@ -93,33 +92,32 @@ func newContext(cfg *Config, extCtx ExternalContext) (ctx *Context, err error) {
 	ctx.External = extCtx
 	ctx.cfg = cfg
 	ctx.exitCode = -1
-	
+
 	cfg.schema.init()
 	ctx.cfg.registerBuiltinHandlers()
-	
+
 	// Initialize readline driver
 	ctx.rl, err = ctx.cfg.Readline.Create(ctx)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Reload schema (requires rl.Stderr() for errors)
 	err = ctx.reloadSchema()
 	if err != nil {
 		ctx.rl.Close()
 		return nil, err
 	}
-	
-	
-	// Some redirections 
+
+	// Some redirections
 	log.SetOutput(ctx.rl.Stderr())
-	
+
 	// Create first root state
 	ctx.states = make([]ContextState, 0, 1)
 	ctx.PushState(true)
-	
+
 	if len(cfg.UserConfig.InitContextURL) > 0 {
-		ctxUrl, err := url.Parse(cfg.UserConfig.InitContextURL) 
+		ctxUrl, err := url.Parse(cfg.UserConfig.InitContextURL)
 		if err != nil {
 			return nil, err
 		}
@@ -129,7 +127,7 @@ func newContext(cfg *Config, extCtx ExternalContext) (ctx *Context, err error) {
 		}
 	}
 	ctx.tick()
-	
+
 	return ctx, nil
 }
 
@@ -182,8 +180,8 @@ func (state *ContextState) URL() *url.URL {
 	return ctxUrl
 }
 
-func (state *ContextState) Reset(newPath... string) {
-	state.Path = newPath 
+func (state *ContextState) Reset(newPath ...string) {
+	state.Path = newPath
 	state.Variables = make(map[string]string)
 }
 
@@ -218,7 +216,7 @@ func (ctx *Context) tick() {
 	if !state.isNew {
 		return
 	}
-	
+
 	// Notify external context about state change with a possibility
 	// to update prompt
 	err := ctx.External.Update(ctx)
@@ -259,7 +257,7 @@ func (ctx *Context) tick() {
 // (Re-)loads schema
 func (ctx *Context) reloadSchema() error {
 	ctx.cfg.schema.reset()
-	
+
 	for _, schemaPath := range ctx.cfg.Schema {
 		if !ctx.loadSchema(schemaPath) {
 			return fmt.Errorf("Error loading schema file %s", schemaPath)
@@ -274,26 +272,26 @@ func (ctx *Context) loadSchema(fpath string) bool {
 		log.Fatalln("Error loading schema file %s: %v", fpath, err)
 	}
 	defer f.Close()
-	
+
 	tokenParser := newParser()
 	tokenParser.parseReader(f)
 	if tokenParser.LastError != nil {
 		// Re-read file to get required line contents and dump parse error
 		var line string
 		lineReader := bufio.NewReader(f)
-		for l := 1 ; l <= tokenParser.Line ; l++ {
+		for l := 1; l <= tokenParser.Line; l++ {
 			line, _ = lineReader.ReadString(byte('\n'))
-		}  
-		ctx.dumpLastError(tokenParser.Position, tokenParser.Position, 
+		}
+		ctx.dumpLastError(tokenParser.Position, tokenParser.Position,
 			tokenParser.Line, []string{line}, tokenParser.LastError)
 		return false
 	}
-	
+
 	parser := ctx.cfg.schema.parse(tokenParser)
 	if parser.LastError != nil {
 		// Re-assemble tokens and dump semantic error
-		lines, startPos, endPos := parser.LastError.cmd.reassembleLines(parser.LastError.index) 
-		ctx.dumpLastError(startPos, endPos, parser.LastError.cmd.getFirstToken().line, 
+		lines, startPos, endPos := parser.LastError.cmd.reassembleLines(parser.LastError.index)
+		ctx.dumpLastError(startPos, endPos, parser.LastError.cmd.getFirstToken().line,
 			lines, parser.LastError.err)
 		return false
 	}
@@ -302,7 +300,7 @@ func (ctx *Context) loadSchema(fpath string) bool {
 
 // Rewinds state steps states back (cd -N)
 func (ctx *Context) rewindState(steps int) (err error) {
-	index := len(ctx.states)-1 + steps
+	index := len(ctx.states) - 1 + steps
 	if index < 0 || index >= len(ctx.states) {
 		return fmt.Errorf("Invalid context index #%d", index)
 	}
@@ -328,7 +326,7 @@ func (ctx *Context) rewindStateRoot() (err error) {
 
 	return fmt.Errorf("Cannot find root state")
 }
-			
+
 func (ctx *Context) interpolateArgument(arg string) string {
 	// TODO: implement argument interpolation
 	return arg

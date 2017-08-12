@@ -22,10 +22,11 @@ func (srv *SRVHostInfo) initialize() {
 type HIGetNexusArgs struct {
 	SubSys  int
 	Reprobe bool
+	Stats   bool
 }
 
 func (srv *SRVHostInfo) HIGetNexus(args *HIGetNexusArgs, reply *hostinfo.HIObject) (err error) {
-	nexus, err := hostinfo.GetNexus(args.SubSys, args.Reprobe)
+	nexus, err := hostinfo.GetNexus(args.SubSys, args.Reprobe, args.Stats)
 	if nexus != nil {
 		*reply = *nexus
 	}
@@ -43,6 +44,7 @@ type hostinfoCmd struct {
 type hostinfoCmdOpt struct {
 	Tree    bool `opt:"tree,opt"`
 	Reprobe bool `opt:"r|reprobe,opt"`
+	Stats   bool `opt:"s|stats,opt"`
 
 	SubSys string `arg:"1"`
 }
@@ -82,7 +84,7 @@ func (cmd *hostinfoCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (err
 	var nexus hostinfo.HIObject
 	ctx := cliCtx.External.(*RexContext)
 	err = ctx.client.Call("SRVHostInfo.HIGetNexus",
-		&HIGetNexusArgs{subsysId, opt.Reprobe}, &nexus)
+		&HIGetNexusArgs{subsysId, opt.Reprobe, opt.Stats}, &nexus)
 	if err != nil {
 		return
 	}
@@ -95,12 +97,12 @@ func (cmd *hostinfoCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (err
 	defer ioh.CloseOutput()
 
 	ioh.StartObject("hiobjects")
-	cmd.writeObjectChildren(ioh, &nexus, opt.Tree)
+	cmd.writeObjectChildren(ioh, &nexus, opt)
 	ioh.EndObject()
 	return
 }
 
-func (cmd *hostinfoCmd) writeObjectChildren(ioh *fishly.IOHandle, nexus *hostinfo.HIObject, tree bool) {
+func (cmd *hostinfoCmd) writeObjectChildren(ioh *fishly.IOHandle, nexus *hostinfo.HIObject, opt *hostinfoCmdOpt) {
 	for name, obj := range nexus.Children {
 		ioh.StartObject("hiobject")
 
@@ -134,6 +136,12 @@ func (cmd *hostinfoCmd) writeObjectChildren(ioh *fishly.IOHandle, nexus *hostinf
 			ioh.WriteRawValue("tid", thread.TID)
 			ioh.WriteRawValue("lifetime", thread.Lifetime)
 			ioh.WriteRawValue("name", thread.Name)
+			if opt.Stats {
+				ioh.WriteRawValue("sys_t", thread.STime)
+				ioh.WriteRawValue("usr_t", thread.UTime)
+				ioh.WriteRawValue("ctxsw", thread.IVCS+thread.VCS)
+				ioh.WriteRawValue("pagefault", thread.MinFault+thread.MajFault)
+			}
 			ioh.EndObject()
 		}
 
@@ -143,9 +151,9 @@ func (cmd *hostinfoCmd) writeObjectChildren(ioh *fishly.IOHandle, nexus *hostinf
 		}
 
 		// Print subnodes in tree mode
-		if tree {
+		if opt.Tree {
 			ioh.StartObject("hiobjects")
-			cmd.writeObjectChildren(ioh, obj, tree)
+			cmd.writeObjectChildren(ioh, obj, opt)
 			ioh.EndObject()
 
 			ioh.EndObject() // hiobject

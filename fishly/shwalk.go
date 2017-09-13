@@ -617,6 +617,25 @@ func (opt *cmdOption) setValue(value string) error {
 		} else {
 			opt.fieldValue.SetUint(uintVal)
 		}
+	case reflect.Float32, reflect.Float64:
+		floatVal, err := strconv.ParseFloat(value, fieldType.Bits())
+		if err != nil {
+			return fmt.Errorf("floating point is required, %s", err)
+		}
+
+		if isSlice {
+			v := reflect.ValueOf(floatVal)
+			switch fieldType.Kind() {
+			case reflect.Float32:
+				v = reflect.ValueOf(float32(floatVal))
+			case reflect.Float64:
+				v = reflect.ValueOf(float64(floatVal))
+			}
+
+			opt.fieldValue.Set(reflect.Append(opt.fieldValue, v))
+		} else {
+			opt.fieldValue.SetFloat(floatVal)
+		}
 	default:
 		return fmt.Errorf("unsupported argument type %s", fieldType.Name())
 	}

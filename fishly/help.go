@@ -29,11 +29,9 @@ type helpRq struct {
 func (*helpCmd) IsApplicable(ctx *Context) bool {
 	return true
 }
-
-func (*helpCmd) NewOptions() interface{} {
+func (*helpCmd) NewOptions(ctx *Context) interface{} {
 	return new(helpOpt)
 }
-
 func (*helpCmd) Complete(ctx *Context, rq *CompleterRequest) {
 	switch rq.ArgIndex {
 	case 1:
@@ -168,7 +166,7 @@ func (rq *helpRq) writeHandler(descriptor *handlerDescriptor) {
 	}
 
 	optDescriptors := generateOptionDescriptors(
-		rq.ctx.cfg.createOptionsForHandler(descriptor), schema.toCommand(),
+		rq.ctx.createOptionsForHandler(descriptor), schema.toCommand(),
 		descriptor.name)
 
 	ioh.StartObject("handler")

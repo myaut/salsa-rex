@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 
+	"os/exec"
+
 	"io/ioutil"
 	"path/filepath"
 	"strings"
@@ -19,6 +21,7 @@ import (
 	"tsfile"
 
 	"rexlib/provider"
+	"rexlib/tsload"
 )
 
 //
@@ -50,6 +53,8 @@ type IncidentHandle struct {
 
 	tsfFile *os.File
 	logFile *os.File
+
+	tsExperiment *exec.Cmd
 }
 
 type IncidentProvider struct {
@@ -82,6 +87,8 @@ type Incident struct {
 	StoppedAt time.Time `json:"stopped_at,omitempty"`
 
 	Providers []*IncidentProvider `json:"providers,omitempty"`
+
+	Experiment *tsload.Experiment `json:"-"`
 }
 
 type IncidentDescriptor struct {
@@ -283,6 +290,17 @@ func (incident *Incident) Merge(other *Incident) error {
 		incident.TickInterval = other.TickInterval
 	}
 
+	if other.Experiment != nil {
+		incident.Experiment = other.Experiment
+
+		// Save experiment or fail. Experiment config is not changed during
+		// incident run, so it is not called from save()
+		err := incident.saveJSONFile(incident.Experiment, "experiment.json")
+		if err != nil {
+			return err
+		}
+	}
+
 	return incident.save()
 }
 
@@ -298,8 +316,10 @@ func (incident *Incident) load() error {
 }
 
 // Saves current incident configuration
-func (incident *Incident) save() (err error) {
-	tempPath := filepath.Join(incident.path, "incident.json.tmp")
+func (incident *Incident) saveJSONFile(obj interface{}, fileName string) (err error) {
+	tempFileName := fmt.Sprintln("%s.tmp", fileName)
+
+	tempPath := filepath.Join(incident.path, tempFileName)
 	f, err := os.Create(tempPath)
 	if err != nil {
 		return
@@ -307,14 +327,18 @@ func (incident *Incident) save() (err error) {
 
 	encoder := json.NewEncoder(f)
 	encoder.SetIndent("  ", "  ")
-	err = encoder.Encode(incident)
+	err = encoder.Encode(obj)
 	if err == nil {
 		err = f.Close()
 	}
 	if err == nil {
-		err = os.Rename(tempPath, filepath.Join(incident.path, "incident.json"))
+		err = os.Rename(tempPath, filepath.Join(incident.path, fileName))
 	}
 	return
+}
+
+func (incident *Incident) save() (err error) {
+	return incident.saveJSONFile(incident, "incident.json")
 }
 
 // Returns incident state based on variables set
@@ -367,6 +391,9 @@ func (incident *Incident) Start() (err error) {
 
 	handle.providerOutput.Log = log.New(handle.logFile, "", log.Ltime|log.Lmicroseconds)
 
+	// If we have an experiment here, create a corresponding command
+	handle.tsExperiment = tsload.CreateTSExperimentCommand(incident.path)
+
 	// If we succeeded, run the incident main routine
 	go handle.run()
 	return
@@ -403,18 +430,31 @@ func (handle *IncidentHandle) Close() {
 		}
 	}
 
+	ilog := handle.providerOutput.Log
 	if handle.providerOutput.Trace != nil {
 		err := handle.providerOutput.Trace.Close()
 		if err != nil {
-			handle.providerOutput.Log.Printf("ERROR: Error while closing trace: %v", err)
+			ilog.Printf("ERROR: Error while closing trace: %v", err)
 		}
 	}
 
 	if handle.tsfFile != nil {
 		err := handle.tsfFile.Close()
 		if err != nil {
-			handle.providerOutput.Log.Printf("ERROR: Error while closing tsfile: %v", err)
+			ilog.Printf("ERROR: Error while closing tsfile: %v", err)
 		}
+	}
+
+	if handle.tsExperiment != nil {
+		if handle.tsExperiment.ProcessState == nil {
+			err := handle.tsExperiment.Process.Kill()
+			if err != nil {
+				ilog.Printf("Failed to kill tsexperiment (pid: %d): %v",
+					handle.tsExperiment.Process.Pid, err)
+			}
+		}
+		ilog.Printf("Finished tsexperiment (pid: %d): %s",
+			handle.tsExperiment.Process.Pid, handle.tsExperiment.ProcessState.String())
 	}
 
 	handle.providerOutput.Log = nil
@@ -435,6 +475,18 @@ func (handle *IncidentHandle) run() {
 	defer handle.Close()
 	defer incident.doStop()
 
+	// Start tsload experiment in parallel with us
+	if handle.tsExperiment != nil {
+		err = handle.tsExperiment.Start()
+		if err == nil {
+			ilog.Printf("Started TSExperiment (pid: %d)", handle.tsExperiment.Process.Pid)
+			go handle.waitTSExperiment()
+		} else {
+			ilog.Println(err)
+			handle.tsExperiment = nil
+		}
+	}
+
 	ticker := time.NewTicker(time.Duration(incident.TickInterval) * time.Millisecond)
 	defer ticker.Stop()
 
@@ -449,6 +501,13 @@ func (handle *IncidentHandle) run() {
 		// Handle all providers if no more provers exit
 		if handle.runProviders() == 0 {
 			return
+		}
+	}
+
+	if handle.tsExperiment != nil {
+		err = handle.tsExperiment.Wait()
+		if err != nil {
+			ilog.Println(err)
 		}
 	}
 }
@@ -507,6 +566,12 @@ func (handle *IncidentHandle) runProviders() (provCount int) {
 		prov.finalized = true
 	}
 	return
+}
+
+// Wait for completion of TSExperiment process and stop it after
+func (handle *IncidentHandle) waitTSExperiment() {
+	handle.tsExperiment.Wait()
+	handle.incident.Stop()
 }
 
 func (incident *Incident) doStop() {

@@ -270,7 +270,7 @@ func (rq *IOFormatterRequest) Close(err error) {
 func (rq *Request) createIOSinkRequest(ctx *Context, sink IOSink, redir *cmdRedirTokenWalker) (err *cmdProcessorError) {
 	sinkRq := &IOSinkRequest{
 		sink:    sink,
-		Options: sink.NewOptions(),
+		Options: sink.NewOptions(ctx),
 	}
 
 	if redir != nil {
@@ -287,7 +287,7 @@ func (rq *Request) createIOFormatterRequest(ctx *Context, formatter IOFormatter,
 	redir *cmdRedirTokenWalker) (err *cmdProcessorError) {
 	formatterRq := &IOFormatterRequest{
 		formatter: formatter,
-		Options:   formatter.NewOptions(),
+		Options:   formatter.NewOptions(ctx),
 		rq:        rq,
 	}
 
@@ -305,7 +305,7 @@ func (rq *Request) addIOPipeRequest(ctx *Context, pipe IOPipe,
 	redir *cmdRedirTokenWalker) (err *cmdProcessorError) {
 	pipeRq := IOPipeRequest{
 		pipe:    pipe,
-		Options: pipe.NewOptions(),
+		Options: pipe.NewOptions(ctx),
 		rq:      rq,
 	}
 

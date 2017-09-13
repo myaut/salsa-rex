@@ -134,7 +134,7 @@ func (rq *completerRq) complete(token cmdToken) ([][]rune, int) {
 		}
 	} else {
 		optionDescriptors := generateOptionDescriptors(
-			rq.ctx.cfg.createOptionsForHandler(rq.handler), schemaCommand{},
+			rq.ctx.createOptionsForHandler(rq.handler), schemaCommand{},
 			rq.handler.name)
 		if token.tokenType == tOption {
 			rq.completeOption(optionDescriptors)

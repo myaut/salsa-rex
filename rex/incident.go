@@ -11,6 +11,7 @@ import (
 
 	"rexlib"
 	"rexlib/provider"
+	"rexlib/tsload"
 
 	"fishly"
 )
@@ -20,8 +21,9 @@ import (
 
 type SRVRex struct{}
 
-func (srv *SRVRex) initialize(path string) {
+func (srv *SRVRex) initialize(path string, tsloadPath string) {
 	rexlib.Initialize(path)
+	tsload.SetTSLoadPath(tsloadPath)
 
 	gob.Register(&IncidentProviderArgs{})
 }
@@ -81,6 +83,8 @@ func (srv *SRVRex) SetIncident(local *rexlib.Incident, reply *struct{}) (err err
 		if local.GetState() == rexlib.IncStopped {
 			return remote.Stop()
 		}
+	case rexlib.IncStopped:
+		return nil
 	}
 
 	return fmt.Errorf("Unexpected transition %d -> %d", remote.GetState(), local.GetState())
@@ -137,6 +141,14 @@ func (ctx *RexContext) refreshIncident() (err error) {
 	return ctx.client.Call("SRVRex.GetIncident", &ctx.incident.Name, ctx.incident)
 }
 
+// saves incident on server
+func (ctx *RexContext) saveIncident() (err error) {
+	if ctx.incident == nil {
+		return fmt.Errorf("Unexpected save in non-incident context")
+	}
+	return ctx.client.Call("SRVRex.SetIncident", ctx.incident, &struct{}{})
+}
+
 //
 // 'create'/'select' command -- creates incident (new or copies) or
 // selects old incident
@@ -149,12 +161,13 @@ type incidentCmd struct {
 }
 
 type incidentCmdOpt struct {
-	Name string `opt:"create=n|name,opt"`
+	Copy      string `opt:"create=c|copy,opt"`
+	Overwrite bool   `opt:"create=o|overwrite,opt"`
 
 	Incident string `arg:"1,opt"`
 }
 
-func (cmd *incidentCmd) NewOptions() interface{} {
+func (cmd *incidentCmd) NewOptions(ctx *fishly.Context) interface{} {
 	return new(incidentCmdOpt)
 }
 
@@ -168,11 +181,18 @@ func (cmd *incidentCmd) Complete(cliCtx *fishly.Context, rq *fishly.CompleterReq
 
 func (cmd *incidentCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (err error) {
 	var incident, other rexlib.Incident
+	var incidentName, copyName string
 
 	// load other incident
 	ctx := cliCtx.External.(*RexContext)
 	opts := rq.Options.(*incidentCmdOpt)
-	if len(opts.Incident) > 0 {
+	if cmd.doCreate {
+		incidentName, copyName = opts.Incident, opts.Copy
+	} else {
+		copyName = opts.Incident
+	}
+
+	if len(copyName) > 0 {
 		err = ctx.client.Call("SRVRex.GetIncident", &opts.Incident, &other)
 		if err != nil {
 			return
@@ -180,9 +200,12 @@ func (cmd *incidentCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (err
 	}
 
 	if cmd.doCreate {
-		// 'create [-n NAME] [INCIDENT]'
-		if len(opts.Name) > 0 {
-			other.Name = opts.Name
+		// 'create [-c COPY] [INCIDENT]'
+		if len(incidentName) > 0 {
+			other.Name = incidentName
+		}
+		if opts.Overwrite {
+			ctx.client.Call("SRVRex.RemoveIncidents", []string{incidentName}, &struct{}{})
 		}
 
 		err = ctx.client.Call("SRVRex.CreateIncident", &other, &incident)
@@ -202,8 +225,12 @@ func (cmd *incidentCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (err
 	}
 
 	// Update state, default path is /incidentName/<prov>
+	// If there is subblock in here, try to execute it
 	cliCtx.PushState(true).Reset(incident.Name)
 	ctx.incident = &incident
+	if cliCtx.ProcessBlock(rq) != nil {
+		cliCtx.RewindState(-1)
+	}
 
 	return
 }
@@ -281,12 +308,19 @@ type incidentSetOpt struct {
 	Description  string `opt:"d|description,opt"`
 }
 
-func (cmd *incidentSetCmd) NewOptions() interface{} {
-	if cmd.nextState != rexlib.IncCreated {
-		return &struct{}{}
+type incidentStopOpt struct {
+	Wait bool `opt:"w|wait,opt"`
+}
+
+func (cmd *incidentSetCmd) NewOptions(cliCtx *fishly.Context) interface{} {
+	switch cmd.nextState {
+	case rexlib.IncCreated:
+		return new(incidentSetOpt)
+	case rexlib.IncStopped:
+		return new(incidentStopOpt)
 	}
 
-	return new(incidentSetOpt)
+	return &struct{}{}
 }
 
 func (cmd *incidentSetCmd) IsApplicable(cliCtx *fishly.Context) bool {
@@ -327,10 +361,20 @@ func (cmd *incidentSetCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (
 		ctx.incident.StartedAt = time.Now()
 	case rexlib.IncStopped:
 		// 'stop'
+		opt := rq.Options.(*incidentStopOpt)
+		if opt.Wait {
+			// Special case -- wait for stop to be issued externally
+			// TODO replace poll
+			for ctx.incident.StoppedAt.IsZero() {
+				time.Sleep(250 * time.Millisecond)
+				ctx.refreshIncident()
+			}
+		}
+
 		ctx.incident.StoppedAt = time.Now()
 	}
 
-	return ctx.client.Call("SRVRex.SetIncident", ctx.incident, &struct{}{})
+	return ctx.saveIncident()
 }
 
 //
@@ -343,7 +387,7 @@ type incidentRemoveOpt struct {
 	Names []string `arg:"1"`
 }
 
-func (cmd *incidentRemoveCmd) NewOptions() interface{} {
+func (cmd *incidentRemoveCmd) NewOptions(cliCtx *fishly.Context) interface{} {
 	return new(incidentRemoveOpt)
 }
 
@@ -379,7 +423,7 @@ type incidentProviderOpt struct {
 	Arguments    []string `arg:"set=1,opt;add=2,opt"`
 }
 
-func (cmd *incidentProviderCmd) NewOptions() interface{} {
+func (cmd *incidentProviderCmd) NewOptions(cliCtx *fishly.Context) interface{} {
 	return new(incidentProviderOpt)
 }
 
@@ -427,6 +471,9 @@ func (cmd *incidentProviderCmd) Execute(cliCtx *fishly.Context, rq *fishly.Reque
 	return
 }
 
+// Build ConfigurationState of a provider from options of add (first argument
+// is the name of provider) or set (first arg is provider index) + parse
+// variable values in [[ns:]name=]values format
 func (cmd *incidentProviderCmd) stateFromOptions(state *provider.ConfigurationState,
 	cliCtx *fishly.Context, rqOptions interface{}) {
 

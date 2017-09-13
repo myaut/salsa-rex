@@ -265,6 +265,5 @@ func getTraceFlags() (flags int) {
 			flags |= HITraceFS
 		}
 	}
-	print(flagNames)
 	return
 }

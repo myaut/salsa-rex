@@ -22,7 +22,7 @@ type Handler interface {
 	// Returns a command-option structure which should be filled in
 	// before creating request to handle options and arguments
 	// NOTE: it is used to generate help, so no side effects please
-	NewOptions() interface{}
+	NewOptions(ctx *Context) interface{}
 
 	// Adds auto-complete strings for arguments and options into rq
 	Complete(ctx *Context, rq *CompleterRequest)
@@ -172,10 +172,10 @@ func (cfg *Config) getHandlerFromDescriptor(descriptor *handlerDescriptor) Handl
 
 // Returns options object corresponding to a descriptor. If descriptor
 // is invalid or doesn't support options, nil is returned
-func (cfg *Config) createOptionsForHandler(descriptor *handlerDescriptor) interface{} {
-	handler := cfg.getHandlerFromDescriptor(descriptor)
+func (ctx *Context) createOptionsForHandler(descriptor *handlerDescriptor) interface{} {
+	handler := ctx.cfg.getHandlerFromDescriptor(descriptor)
 	if handler != nil {
-		return handler.NewOptions()
+		return handler.NewOptions(ctx)
 	}
 
 	return nil
@@ -276,7 +276,7 @@ func (ods optionDescriptorSlice) resolveSchemaNodes(command schemaCommand) {
 
 func (*HandlerWithoutCompletion) Complete(ctx *Context, rq *CompleterRequest) {
 }
-func (*HandlerWithoutOptions) NewOptions() interface{} {
+func (*HandlerWithoutOptions) NewOptions(ctx *Context) interface{} {
 	var opt struct{}
 	return &opt
 }

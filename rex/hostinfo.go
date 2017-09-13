@@ -54,7 +54,7 @@ var hostinfoSubsystems []string = []string{
 	"disk",
 }
 
-func (cmd *hostinfoCmd) NewOptions() interface{} {
+func (cmd *hostinfoCmd) NewOptions(ctx *fishly.Context) interface{} {
 	return new(hostinfoCmdOpt)
 }
 

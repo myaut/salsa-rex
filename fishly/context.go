@@ -1,7 +1,6 @@
 package fishly
 
 import (
-	"bufio"
 	"fmt"
 	"log"
 
@@ -277,29 +276,21 @@ func (ctx *Context) loadSchema(fpath string) bool {
 	tokenParser.parseReader(f)
 	if tokenParser.LastError != nil {
 		// Re-read file to get required line contents and dump parse error
-		var line string
-		lineReader := bufio.NewReader(f)
-		for l := 1; l <= tokenParser.Line; l++ {
-			line, _ = lineReader.ReadString(byte('\n'))
-		}
-		ctx.dumpLastError(tokenParser.Position, tokenParser.Position,
-			tokenParser.Line, []string{line}, tokenParser.LastError)
+		ctx.dumpLastParserError(f, tokenParser)
 		return false
 	}
 
 	parser := ctx.cfg.schema.parse(tokenParser)
 	if parser.LastError != nil {
 		// Re-assemble tokens and dump semantic error
-		lines, startPos, endPos := parser.LastError.cmd.reassembleLines(parser.LastError.index)
-		ctx.dumpLastError(startPos, endPos, parser.LastError.cmd.getFirstToken().line,
-			lines, parser.LastError.err)
+		ctx.dumpLastProcessorError(parser.LastError)
 		return false
 	}
 	return true
 }
 
 // Rewinds state steps states back (cd -N)
-func (ctx *Context) rewindState(steps int) (err error) {
+func (ctx *Context) RewindState(steps int) (err error) {
 	index := len(ctx.states) - 1 + steps
 	if index < 0 || index >= len(ctx.states) {
 		return fmt.Errorf("Invalid context index #%d", index)
@@ -320,7 +311,7 @@ func (ctx *Context) rewindStateRoot() (err error) {
 	for steps := -1; steps >= -len(ctx.states); steps-- {
 		topState := ctx.states[len(ctx.states)+steps-1]
 		if topState.isRoot {
-			return ctx.rewindState(steps)
+			return ctx.RewindState(steps)
 		}
 	}
 
@@ -347,7 +338,7 @@ type historyOpt struct {
 func (*historyCmd) IsApplicable(ctx *Context) bool {
 	return true
 }
-func (*historyCmd) NewOptions() interface{} {
+func (*historyCmd) NewOptions(ctx *Context) interface{} {
 	return new(historyOpt)
 }
 func (*historyCmd) Complete(ctx *Context, rq *CompleterRequest) {

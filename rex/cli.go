@@ -16,6 +16,9 @@ type RexContext struct {
 
 	incident      *rexlib.Incident
 	providerIndex int
+
+	tsloadExperimentMode bool
+	tsloadWorkload       string
 }
 
 func (ctx *RexContext) Update(cliCtx *fishly.Context) (err error) {
@@ -31,12 +34,21 @@ func (ctx *RexContext) Update(cliCtx *fishly.Context) (err error) {
 		}
 	}
 
+	ctx.reset()
 	if ctx.incident != nil {
 		prompt = ctx.incident.Name
-		if len(path) >= 3 {
+
+		if len(path) >= 2 && path[1] == "tsload" {
+			ctx.tsloadExperimentMode = true
+			prompt = fmt.Sprintf("%s [tsload]", prompt)
+
+			if len(path) >= 3 {
+				ctx.tsloadWorkload = path[2]
+				prompt = fmt.Sprintf("%s/%s", prompt, ctx.tsloadWorkload)
+			}
+		} else if len(path) >= 3 {
 			prompt = fmt.Sprintf("%s %s#%s", prompt, path[1], path[2])
 
-			ctx.providerIndex = -1
 			switch path[1] {
 			case "prov":
 				pi, _ := strconv.ParseInt(path[2], 10, 32)
@@ -47,6 +59,14 @@ func (ctx *RexContext) Update(cliCtx *fishly.Context) (err error) {
 
 	cliCtx.Prompt = prompt
 	return
+}
+
+// reset context fields (except incident itself) before updating according
+// to a context
+func (ctx *RexContext) reset() {
+	ctx.providerIndex = -1
+	ctx.tsloadExperimentMode = false
+	ctx.tsloadWorkload = ""
 }
 
 func (ctx *RexContext) Cancel(rq *fishly.Request) {
@@ -89,4 +109,10 @@ func (ctx *RexContext) registerCommands(cliCfg *fishly.Config) {
 
 	cliCfg.RegisterCommand(&incidentProviderCmd{isSet: false}, "incident", "add")
 	cliCfg.RegisterCommand(&incidentProviderCmd{isSet: true}, "incident", "set")
+
+	cliCfg.RegisterCommand(&tsloadCmd{}, "tsload", "tsload")
+	cliCfg.RegisterCommand(&tsloadThreadPoolCmd{}, "tsload", "threadpool")
+	cliCfg.RegisterCommand(&tsloadWorkloadCmd{}, "tsload", "workload")
+	cliCfg.RegisterCommand(&tsloadWLParamCmd{}, "tsload", "param")
+	cliCfg.RegisterCommand(&tsloadWLStepsCmd{}, "tsload", "steps")
 }

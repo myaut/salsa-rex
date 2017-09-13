@@ -34,7 +34,8 @@ type RexConfig struct {
 	Socket      string
 	SocketGroup string
 
-	DataDir string
+	DataDir    string
+	TSLoadPath string
 
 	// CLI-related variables
 	cliCfg   fishly.UserConfig
@@ -174,6 +175,6 @@ func (rexCfg *RexConfig) setupRPC() {
 	rpc.Register(srvHI)
 
 	srvRex := &SRVRex{}
-	srvRex.initialize(rexCfg.DataDir)
+	srvRex.initialize(rexCfg.DataDir, rexCfg.TSLoadPath)
 	rpc.Register(srvRex)
 }

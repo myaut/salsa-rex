@@ -19,7 +19,7 @@ type jsonFormatterRq struct {
 	w      *bufio.Writer
 }
 
-func (*jsonFormatter) NewOptions() interface{} {
+func (*jsonFormatter) NewOptions(ctx *Context) interface{} {
 	return new(jsonFormatterOpt)
 }
 

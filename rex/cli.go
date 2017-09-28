@@ -1,10 +1,7 @@
 package main
 
 import (
-	"fmt"
-
 	"net/rpc"
-	"strconv"
 
 	"fishly"
 	"rexlib"
@@ -15,58 +12,31 @@ type RexContext struct {
 	client *rpc.Client
 
 	incident      *rexlib.Incident
-	providerIndex int
+	ProviderIndex int `ctxvar:"provider" default:"-1"`
 
-	tsloadExperimentMode bool
-	tsloadWorkload       string
+	TSLoadExperimentMode bool   `ctxvar:"tsload"`
+	TSLoadWorkload       string `ctxvar:"workload"`
 }
 
 func (ctx *RexContext) Update(cliCtx *fishly.Context) (err error) {
 	var prompt string
 	path := cliCtx.GetCurrentState().Path
 
-	if len(path) > 0 && (ctx.incident == nil || ctx.incident.Name != path[0]) {
-		ctx.incident = new(rexlib.Incident)
-		err = ctx.client.Call("SRVRex.GetIncident", &path[0], ctx.incident)
-		if err != nil {
-			ctx.incident = nil
-			return
-		}
-	}
-
-	ctx.reset()
-	if ctx.incident != nil {
-		prompt = ctx.incident.Name
-
-		if len(path) >= 2 && path[1] == "tsload" {
-			ctx.tsloadExperimentMode = true
-			prompt = fmt.Sprintf("%s [tsload]", prompt)
-
-			if len(path) >= 3 {
-				ctx.tsloadWorkload = path[2]
-				prompt = fmt.Sprintf("%s/%s", prompt, ctx.tsloadWorkload)
-			}
-		} else if len(path) >= 3 {
-			prompt = fmt.Sprintf("%s %s#%s", prompt, path[1], path[2])
-
-			switch path[1] {
-			case "prov":
-				pi, _ := strconv.ParseInt(path[2], 10, 32)
-				ctx.providerIndex = int(pi)
+	if len(path) > 0 {
+		if ctx.incident == nil || ctx.incident.Name != path[0] {
+			ctx.incident = new(rexlib.Incident)
+			err = ctx.client.Call("SRVRex.GetIncident", &path[0], ctx.incident)
+			if err != nil {
+				ctx.incident = nil
+				return
 			}
 		}
+	} else {
+		ctx.incident = nil
 	}
 
 	cliCtx.Prompt = prompt
 	return
-}
-
-// reset context fields (except incident itself) before updating according
-// to a context
-func (ctx *RexContext) reset() {
-	ctx.providerIndex = -1
-	ctx.tsloadExperimentMode = false
-	ctx.tsloadWorkload = ""
 }
 
 func (ctx *RexContext) Cancel(rq *fishly.Request) {
@@ -109,6 +79,8 @@ func (ctx *RexContext) registerCommands(cliCfg *fishly.Config) {
 
 	cliCfg.RegisterCommand(&incidentProviderCmd{isSet: false}, "incident", "add")
 	cliCfg.RegisterCommand(&incidentProviderCmd{isSet: true}, "incident", "set")
+
+	cliCfg.RegisterCommand(&incidentGetCmd{}, "incident", "get")
 
 	cliCfg.RegisterCommand(&tsloadCmd{}, "tsload", "tsload")
 	cliCfg.RegisterCommand(&tsloadThreadPoolCmd{}, "tsload", "threadpool")

@@ -34,16 +34,17 @@ func (ctx *RexContext) getWorkload() (exp *tsload.Experiment,
 		return nil, nil, fmt.Errorf("Invalid incident or experiment")
 	}
 
-	wl, ok := exp.Workloads[ctx.tsloadWorkload]
+	wl, ok := exp.Workloads[ctx.TSLoadWorkload]
 	if !ok || wl == nil {
-		return nil, nil, fmt.Errorf("Invalid workload name '%s'", ctx.tsloadWorkload)
+		return nil, nil, fmt.Errorf("Invalid workload name '%s'", ctx.TSLoadWorkload)
 	}
 
 	return exp, wl, nil
 }
 
 //
-// 'tsload' command starts defining tsexperiment
+// 'tsload' command starts defining tsexperiment and changes context/executes
+// subcommmands in them
 //
 
 type tsloadCmd struct {
@@ -69,19 +70,19 @@ func (*tsloadCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (err error
 			int64(ctx.incident.TickInterval)*1000000)
 	}
 
-	ctx.tsloadExperimentMode = true
-
 	// If there is subblock in here, try to execute it
-	cliCtx.PushState(false).Reset(ctx.incident.Name, "tsload")
-	if cliCtx.ProcessBlock(rq) != nil {
-		cliCtx.RewindState(-1)
+	state := cliCtx.GetCurrentState()
+	cliCtx.PushState(false)
+	ctx.TSLoadExperimentMode = true
+	if cliCtx.ProcessBlock(rq) == nil {
+		cliCtx.RestoreState(state)
 	}
 
 	return ctx.saveIncident()
 }
 
 //
-// Helper IsApplicable mixins
+// Helper IsApplicable() mixins for workload and experiment commands
 //
 
 type tsloadExperimentCmd struct {
@@ -89,7 +90,7 @@ type tsloadExperimentCmd struct {
 
 func (cmd *tsloadExperimentCmd) IsApplicable(cliCtx *fishly.Context) bool {
 	ctx := cliCtx.External.(*RexContext)
-	return ctx.tsloadExperimentMode
+	return ctx.TSLoadExperimentMode
 }
 
 type tsloadExperimentWorkloadCmd struct {
@@ -97,11 +98,12 @@ type tsloadExperimentWorkloadCmd struct {
 
 func (cmd *tsloadExperimentWorkloadCmd) IsApplicable(cliCtx *fishly.Context) bool {
 	ctx := cliCtx.External.(*RexContext)
-	return ctx.tsloadExperimentMode && len(ctx.tsloadWorkload) > 0
+	return ctx.TSLoadExperimentMode && len(ctx.TSLoadWorkload) > 0
 }
 
 //
-// 'threadpool' command
+// 'threadpool' command defines new threadpool inside TSLoad experiment.
+// It doesn't change context: all parameters can be set in a single command
 //
 
 type tsloadThreadPoolCmd struct {
@@ -129,7 +131,8 @@ func (*tsloadThreadPoolCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) 
 }
 
 //
-// 'workload' command
+// 'workload' command adds new workload. Changes context to that workload
+// and allows to define its steps and parameter values.
 //
 
 type tsloadWorkloadCmd struct {
@@ -154,17 +157,18 @@ func (*tsloadWorkloadCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (e
 	exp.Workloads[wl.Name] = wl
 
 	// Run workload subcommands: param and steps
-	cliCtx.PushState(false).Reset(ctx.incident.Name, "tsload", wl.Name)
-	ctx.tsloadWorkload = wl.Name
-	if cliCtx.ProcessBlock(rq) != nil {
-		cliCtx.RewindState(-1)
+	state := cliCtx.GetCurrentState()
+	cliCtx.PushState(false)
+	ctx.TSLoadWorkload = wl.Name
+	if cliCtx.ProcessBlock(rq) == nil {
+		cliCtx.RestoreState(state)
 	}
 
 	return ctx.saveIncident()
 }
 
 //
-// 'param' command
+// 'param' command sets workload parameter
 //
 
 type tsloadWLParamCmd struct {
@@ -190,7 +194,7 @@ func (*tsloadWLParamCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (er
 }
 
 //
-// 'steps' command
+// 'steps' command defines workload steps
 //
 
 type tsloadWLStepsCmd struct {
@@ -209,6 +213,6 @@ func (*tsloadWLStepsCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (er
 		return
 	}
 
-	exp.Steps[ctx.tsloadWorkload] = rq.Options.(*tsload.WLSteps)
+	exp.Steps[ctx.TSLoadWorkload] = rq.Options.(*tsload.WLSteps)
 	return ctx.saveIncident()
 }

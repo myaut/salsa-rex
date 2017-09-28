@@ -229,6 +229,8 @@ func (prov *SysStatProvider) Prepare(handle *provider.OutputHandle) (err error) 
 		stat := &stats[statIdx]
 		fields = append(fields, tsfile.NewField(stat.name, rType))
 	}
+	fields = append(fields, tsfile.NewStartTimeField())
+	fields = append(fields, tsfile.NewEndTimeField())
 
 	schema, err := tsfile.NewSchema("sysstat", fields)
 	if err == nil {
@@ -246,10 +248,10 @@ func (prov *SysStatProvider) Collect(handle *provider.OutputHandle) {
 	defer sfr.Close()
 
 	// Current snapshot of absolute values
-	snap := make([]int64, len(prov.stats))
+	snap := make([]int64, len(prov.stats)+2)
 
 	// Processed values which take into account cumulative
-	values := make([]int64, len(prov.stats))
+	values := make([]int64, len(prov.stats)+2)
 	var valueCount int
 
 	now := handle.Now
@@ -287,6 +289,9 @@ func (prov *SysStatProvider) Collect(handle *provider.OutputHandle) {
 		values[index] = value
 		valueCount++
 	}
+
+	values[valueCount] = prov.lastTime.UnixNano() - handle.GlobalTime
+	values[valueCount+1] = now.UnixNano() - handle.GlobalTime
 
 	if valueCount == len(prov.stats) {
 		// All values have been collected, time to write something to TSF

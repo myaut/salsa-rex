@@ -77,3 +77,18 @@ type incidents array incident {
 		row description
 	}
 }
+
+
+#
+# Incidents series schema
+
+type seriesEntry struct {
+	var name string
+}
+type series array seriesEntry {
+	text -table {
+		col -w 12 -hdr NAME name
+		col -w 18 -hdr Ts   start_time
+		col -w 18 -hdr Te   end_time
+	}
+}

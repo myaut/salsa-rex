@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"log"
 
-	"os/exec"
-
 	"io/ioutil"
+	"os/exec"
 	"path/filepath"
+
 	"strings"
 
 	"sync"
@@ -36,6 +36,8 @@ import (
 
 const (
 	defaultIncidentTickInterval = 100
+
+	defferedTraceCloseDelay time.Duration = 5 * time.Second
 )
 
 type IncState int
@@ -51,8 +53,8 @@ type IncidentHandle struct {
 
 	providerOutput provider.OutputHandle
 
-	tsfFile *os.File
-	logFile *os.File
+	traceFile *os.File
+	logFile   *os.File
 
 	tsExperiment *exec.Cmd
 }
@@ -69,7 +71,7 @@ type IncidentProvider struct {
 }
 
 type Incident struct {
-	// Protects running provider
+	// Protects running incident
 	mtx sync.Mutex
 
 	// Incident's name and path to incident directory
@@ -89,6 +91,14 @@ type Incident struct {
 	Providers []*IncidentProvider `json:"providers,omitempty"`
 
 	Experiment *tsload.Experiment `json:"-"`
+
+	TraceStats tsfile.TSFileStats `json:"trace_stats"`
+
+	// Reference to open trace file for running incidents or opened file
+	// for completed incidents
+	trace       *tsfile.TSFile
+	traceFile   *os.File
+	traceCloser chan struct{}
 }
 
 type IncidentDescriptor struct {
@@ -149,12 +159,26 @@ func (state *incidentsState) load() error {
 			incident.Name = fi.Name()
 			incident.path = filepath.Join(incidentDir, incident.Name)
 
-			err := incident.load()
-			if err == nil {
-				oldIncidents = append(oldIncidents, incident)
-				state.cache[incident.Name] = incident
+			// TODO we need description for GetList, but we need to defer
+			// incident loading somehow
+
+			// TODO decide what to do with failed incidents
+			err := incident.loadJSONFile(incident, "incident.json")
+			if err != nil {
+				continue
 			}
-			// TODO: decide what to do with failed incidents
+
+			if _, err := os.Stat(filepath.Join(incident.path, "experiment.json")); err == nil {
+				incident.Experiment = new(tsload.Experiment)
+				err = incident.loadJSONFile(incident.Experiment, "experiment.json")
+				if err != nil {
+					fmt.Println(err)
+					continue
+				}
+			}
+
+			oldIncidents = append(oldIncidents, incident)
+			state.cache[incident.Name] = incident
 		}
 	}
 
@@ -273,7 +297,10 @@ func (state *incidentsState) New(other *Incident) (incident *Incident, err error
 	incident.TickInterval = defaultIncidentTickInterval
 	err = incident.Merge(other)
 	if err == nil {
-		err = incident.save()
+		err = incident.mergeProviders(other)
+	}
+	if err == nil {
+		err = incident.saveBoth()
 	}
 	if err == nil {
 		state.add(incident)
@@ -292,27 +319,20 @@ func (incident *Incident) Merge(other *Incident) error {
 
 	if other.Experiment != nil {
 		incident.Experiment = other.Experiment
-
-		// Save experiment or fail. Experiment config is not changed during
-		// incident run, so it is not called from save()
-		err := incident.saveJSONFile(incident.Experiment, "experiment.json")
-		if err != nil {
-			return err
-		}
 	}
 
-	return incident.save()
+	return nil
 }
 
 // Loads incident from incident.json
-func (incident *Incident) load() error {
-	path := filepath.Join(incident.path, "incident.json")
+func (incident *Incident) loadJSONFile(obj interface{}, fileName string) error {
+	path := filepath.Join(incident.path, fileName)
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 
-	return json.NewDecoder(f).Decode(incident)
+	return json.NewDecoder(f).Decode(obj)
 }
 
 // Saves current incident configuration
@@ -339,6 +359,15 @@ func (incident *Incident) saveJSONFile(obj interface{}, fileName string) (err er
 
 func (incident *Incident) save() (err error) {
 	return incident.saveJSONFile(incident, "incident.json")
+}
+
+func (incident *Incident) saveBoth() (err error) {
+	err = incident.saveJSONFile(incident, "incident.json")
+
+	if err == nil && incident.Experiment != nil {
+		err = incident.saveJSONFile(incident.Experiment, "experiment.json")
+	}
+	return
 }
 
 // Returns incident state based on variables set
@@ -370,17 +399,14 @@ func (incident *Incident) Start() (err error) {
 	handle := new(IncidentHandle)
 	handle.incident = incident
 
-	handle.tsfFile, err = os.Create(filepath.Join(incident.path, "trace.tsf"))
-	if err != nil {
-		handle.Close()
-		return fmt.Errorf("Cannot create trace file: %v", err)
-	}
-
-	handle.providerOutput.Trace, err = tsfile.NewTSFile(handle.tsfFile, 2)
+	err = incident.createTraceFile()
 	if err != nil {
 		handle.Close()
 		return fmt.Errorf("Cannot create trace TS file: %v", err)
 	}
+
+	handle.traceFile = incident.traceFile
+	handle.providerOutput.Trace = incident.trace
 
 	handle.logFile, err = os.OpenFile(filepath.Join(incident.path, "incident.log"),
 		os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
@@ -431,18 +457,10 @@ func (handle *IncidentHandle) Close() {
 	}
 
 	ilog := handle.providerOutput.Log
-	if handle.providerOutput.Trace != nil {
-		err := handle.providerOutput.Trace.Close()
-		if err != nil {
-			ilog.Printf("ERROR: Error while closing trace: %v", err)
-		}
-	}
 
-	if handle.tsfFile != nil {
-		err := handle.tsfFile.Close()
-		if err != nil {
-			ilog.Printf("ERROR: Error while closing tsfile: %v", err)
-		}
+	err := handle.incident.closeTraceFile()
+	if err != nil {
+		ilog.Printf("ERROR: Error while closing trace: %v", err)
 	}
 
 	if handle.tsExperiment != nil {
@@ -461,13 +479,35 @@ func (handle *IncidentHandle) Close() {
 	handle.logFile.Close()
 }
 
+func (incident *Incident) closeTraceFile() (err error) {
+	if incident.traceFile != nil {
+		err = incident.trace.Close()
+		if err != nil {
+			return
+		}
+
+		err = incident.traceFile.Close()
+	}
+
+	incident.traceFile = nil
+	incident.trace = nil
+	return
+}
+
 func (handle *IncidentHandle) run() {
 	var err error
 	incident := handle.incident
 	ilog := handle.providerOutput.Log
 
+	// Set started at timestamp
 	incident.StartedAt = time.Now()
-	err = incident.save()
+	if incident.Experiment != nil {
+		incident.Experiment.GlobalTime = incident.StartedAt.UnixNano()
+	}
+	handle.providerOutput.GlobalTime = incident.StartedAt.UnixNano()
+
+	// Save incident (and experiment with timestamp)
+	err = incident.saveBoth()
 	if err != nil {
 		ilog.Println(err)
 	}
@@ -500,8 +540,10 @@ func (handle *IncidentHandle) run() {
 
 		// Handle all providers if no more provers exit
 		if handle.runProviders() == 0 {
-			return
+			break
 		}
+
+		incident.TraceStats = handle.providerOutput.Trace.GetStats()
 	}
 
 	if handle.tsExperiment != nil {
@@ -509,7 +551,10 @@ func (handle *IncidentHandle) run() {
 		if err != nil {
 			ilog.Println(err)
 		}
+
+		handle.importExperimentWorkloads()
 	}
+	handle.logTraceStatistics()
 }
 
 func (handle *IncidentHandle) runProviders() (provCount int) {
@@ -560,7 +605,7 @@ func (handle *IncidentHandle) runProviders() (provCount int) {
 		continue
 
 	badProvider:
-		handle.providerOutput.Log.Println("ERROR: Error in provider #%d: %v",
+		handle.providerOutput.Log.Printf("ERROR: Error in provider #%d: %v",
 			provIndex, err)
 		prov.StoppedAt = prov.StartedAt
 		prov.finalized = true
@@ -734,4 +779,24 @@ func (prov *IncidentProvider) reorderSteps(steps []*provider.ConfigurationStep) 
 	}
 
 	return newSteps, nil
+}
+
+// Re-run configuration steps for a provider when copying it from one incident
+// to another
+func (incident *Incident) mergeProviders(other *Incident) (err error) {
+	for _, prov := range other.Providers {
+		firstStep := provider.ConfigurationStep{Values: []string{prov.Name}}
+		configuration := []*provider.ConfigurationStep{&firstStep}
+		state := &provider.ConfigurationState{
+			ProviderIndex: -1,
+			Configuration: append(configuration, prov.Config.Configuration...),
+			Committed:     prov.Config.Committed,
+		}
+
+		err = incident.ConfigureProvider(provider.ConfigureSetValue, state)
+		if err != nil {
+			return
+		}
+	}
+	return nil
 }

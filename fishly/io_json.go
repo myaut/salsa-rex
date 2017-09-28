@@ -99,24 +99,30 @@ func (f *jsonFormatter) Run(ctx *Context, rq *IOFormatterRequest) {
 		// Print normal value token as struct property or as substruct in array
 		// of unions (if elementNode != nil). If it is not the first property
 		// for current struct, add comma
-		if variable != nil && token.TokenType == Value {
+		if token.TokenType == Value {
 			if top.count > 0 {
 				jrq.w.WriteRune(',')
 			}
 			jrq.newline()
 
-			if top.elementNode != nil && len(variable.varNode.name) == 0 {
-				jrq.writePropValue(token)
+			if variable != nil {
+				if top.elementNode != nil && len(variable.varNode.name) == 0 {
+					jrq.writePropValue(token)
+				} else {
+					if top.elementNode != nil {
+						jrq.w.WriteRune('{')
+					}
+					jrq.writePropName(variable.varNode.name)
+					jrq.writePropValue(token)
+					if top.elementNode != nil {
+						jrq.w.WriteRune('}')
+					}
+				}
 			} else {
-				if top.elementNode != nil {
-					jrq.w.WriteRune('{')
-				}
-				jrq.writePropName(variable.varNode.name)
+				jrq.writePropName(token.Tag)
 				jrq.writePropValue(token)
-				if top.elementNode != nil {
-					jrq.w.WriteRune('}')
-				}
 			}
+			top.count++
 		}
 	}
 }

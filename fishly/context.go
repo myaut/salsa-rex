@@ -8,6 +8,8 @@ import (
 
 	"os"
 
+	"reflect"
+
 	"net/url"
 	"path/filepath"
 )
@@ -33,6 +35,10 @@ type ContextState struct {
 	// Is this state a new state (should we recompute
 	// prompt & list of available commands)
 	isNew bool
+
+	// Is new state incomplete (variables need to be re-synced from external
+	// context). State is incomplete until reset is called
+	isIncomplete bool
 
 	// Root state are not evicted and handled specially when 'cd'
 	// is issued
@@ -113,7 +119,7 @@ func newContext(cfg *Config, extCtx ExternalContext) (ctx *Context, err error) {
 
 	// Create first root state
 	ctx.states = make([]ContextState, 0, 1)
-	ctx.PushState(true)
+	ctx.PushState(true).Reset()
 
 	if len(cfg.UserConfig.InitContextURL) > 0 {
 		ctxUrl, err := url.Parse(cfg.UserConfig.InitContextURL)
@@ -135,6 +141,28 @@ func (ctx *Context) GetCurrentState() *ContextState {
 	return &ctx.states[len(ctx.states)-1]
 }
 
+// Helper function which creates copy of the state on top of the current state
+func (ctx *Context) pushStateCopy(isRoot, isIncomplete bool, oldState *ContextState) *ContextState {
+	state := ContextState{
+		Path:         make([]string, len(oldState.Path)),
+		Variables:    make(map[string]string),
+		isNew:        true,
+		isRoot:       isRoot,
+		isIncomplete: isIncomplete,
+	}
+
+	// Copy values
+	copy(state.Path, oldState.Path)
+	for k, v := range oldState.Variables {
+		state.Variables[k] = v
+	}
+
+	// TODO: cleanup history up to N values
+
+	ctx.states = append(ctx.states, state)
+	return ctx.GetCurrentState()
+}
+
 // Creates new state which is the copy of the head context state
 func (ctx *Context) PushState(isRoot bool) *ContextState {
 	var currentState *ContextState
@@ -148,23 +176,7 @@ func (ctx *Context) PushState(isRoot bool) *ContextState {
 		}
 	}
 
-	state := ContextState{
-		Path:      make([]string, len(currentState.Path)),
-		Variables: make(map[string]string),
-		isNew:     true,
-		isRoot:    isRoot,
-	}
-
-	// Copy values
-	copy(state.Path, currentState.Path)
-	for k, v := range currentState.Variables {
-		state.Variables[k] = v
-	}
-
-	// TODO: cleanup history up to N values
-
-	ctx.states = append(ctx.states, state)
-	return ctx.GetCurrentState()
+	return ctx.pushStateCopy(isRoot, true, currentState)
 }
 
 func (state *ContextState) URL() *url.URL {
@@ -172,16 +184,21 @@ func (state *ContextState) URL() *url.URL {
 
 	ctxUrl.Scheme = "ctx"
 	ctxUrl.Path = "/" + filepath.Join(state.Path...)
+
+	queryValues := make(url.Values)
 	for key, value := range state.Variables {
-		ctxUrl.Query().Add(key, value)
+		queryValues.Add(key, value)
 	}
+	ctxUrl.RawQuery = queryValues.Encode()
 
 	return ctxUrl
 }
 
-func (state *ContextState) Reset(newPath ...string) {
+func (state *ContextState) Reset(newPath ...string) *ContextState {
 	state.Path = newPath
 	state.Variables = make(map[string]string)
+	state.isIncomplete = false
+	return state
 }
 
 // Creates new state from context url. Raises error if URL is invalid
@@ -209,6 +226,60 @@ func (ctx *Context) PushStateFromURL(ctxUrl *url.URL, isRoot bool) error {
 	return nil
 }
 
+func (ctx *Context) syncExternalVariables(doLoad bool) {
+	state := ctx.GetCurrentState()
+	value := reflect.ValueOf(ctx.External)
+	if value.Kind() == reflect.Ptr {
+		value = reflect.Indirect(value)
+	}
+
+	extType := value.Type()
+	for fieldIdx := 0; fieldIdx < extType.NumField(); fieldIdx++ {
+		// Check for ctxvar type tag defining context variable
+		field := extType.Field(fieldIdx)
+		varName, hasTag := field.Tag.Lookup("ctxvar")
+		if !hasTag {
+			continue
+		}
+
+		// Check for default value (or use type-zero value)
+		defaultStr := field.Tag.Get("default")
+		fieldValue := value.Field(fieldIdx)
+		mapValueInterface, hasMVI := state.Variables[varName]
+
+		if doLoad {
+			// Load variable from external context
+			actualStr := fmt.Sprint(fieldValue.Interface())
+			if len(defaultStr) == 0 {
+				defaultStr = fmt.Sprint(reflect.Zero(field.Type).Interface())
+			}
+
+			if actualStr == defaultStr {
+				// Delete variables that are set to default value in ext
+				// context struct (if they are set)
+				if hasMVI {
+					delete(state.Variables, varName)
+				}
+			} else {
+				// Update variables that are changed
+				state.Variables[varName] = actualStr
+			}
+		} else {
+			// Save variables into external context
+			valueStr := defaultStr
+			if hasMVI {
+				valueStr = mapValueInterface
+			}
+
+			if len(valueStr) > 0 {
+				fmt.Sscan(valueStr, fieldValue.Addr().Interface())
+			} else {
+				fieldValue.Set(reflect.Zero(field.Type))
+			}
+		}
+	}
+}
+
 // internal function that updates context after request has finished
 func (ctx *Context) tick() {
 	state := ctx.GetCurrentState()
@@ -216,12 +287,19 @@ func (ctx *Context) tick() {
 		return
 	}
 
+	// First, load/save variables from state. On incomplete states (left
+	// after PushState() in Execute() of the command), load state variables
+	// from external context
+	if state.isIncomplete {
+		ctx.syncExternalVariables(true)
+	}
+
 	// Notify external context about state change with a possibility
 	// to update prompt
 	err := ctx.External.Update(ctx)
 	for err != nil {
 		if len(ctx.states) == 0 {
-			state = ctx.PushState(true)
+			state = ctx.PushState(true).Reset()
 			break
 		}
 
@@ -251,6 +329,7 @@ func (ctx *Context) tick() {
 	}
 
 	state.isNew = false
+	state.isIncomplete = false
 }
 
 // (Re-)loads schema
@@ -289,6 +368,11 @@ func (ctx *Context) loadSchema(fpath string) bool {
 	return true
 }
 
+// Restores state saved earlier with GetCurrentState()
+func (ctx *Context) RestoreState(state *ContextState) *ContextState {
+	return ctx.pushStateCopy(state.isRoot, false, state)
+}
+
 // Rewinds state steps states back (cd -N)
 func (ctx *Context) RewindState(steps int) (err error) {
 	index := len(ctx.states) - 1 + steps
@@ -303,6 +387,7 @@ func (ctx *Context) RewindState(steps int) (err error) {
 	}
 
 	ctx.states = append(ctx.states, topState)
+	ctx.syncExternalVariables(false)
 	return nil
 }
 

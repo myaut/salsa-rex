@@ -13,7 +13,8 @@ type OutputHandle struct {
 	Trace *tsfile.TSFile
 	Log   *log.Logger
 
-	Now time.Time
+	Now        time.Time
+	GlobalTime int64
 }
 
 type ConfigurationAction int

@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"reflect"
+
 	"strconv"
 
 	"encoding/json"
@@ -111,6 +113,22 @@ type WLParameters struct {
 	Params []*WLParam
 }
 
+type WLParametersChunk struct {
+	Params []*WLParam
+}
+
+type jsonPMapEntry struct {
+	Probability float32     `json:"probability"`
+	Value       interface{} `json:"value,omitempty"`
+	ValArray    interface{} `json:"valarray,omitempty"`
+}
+
+type jsonParamValue struct {
+	RandGen        *WLParamRandGen `json:"randgen,omitempty"`
+	RandVar        *WLParamRandVar `json:"randvar,omitempty"`
+	ProbabilityMap []jsonPMapEntry `json:"pmap,omitempty"`
+}
+
 type Workload struct {
 	Name string `json:"-" arg:"1"`
 	Type string `json:"wltype" arg:"2"`
@@ -123,8 +141,9 @@ type Workload struct {
 }
 
 type Experiment struct {
-	Name      string `json:"name"`
-	SingleRun bool   `json:"single_run"`
+	Name       string `json:"name"`
+	SingleRun  bool   `json:"single_run"`
+	GlobalTime int64  `json:"global_time"`
 
 	Steps       map[string]*WLSteps    `json:"steps"`
 	ThreadPools map[string]*ThreadPool `json:"threadpools"`
@@ -210,24 +229,11 @@ func (param *WLParam) interpretValues() (interface{}, bool) {
 	}
 
 	return param.Values, len(param.Values) > 1
-
 }
 
 // experiment.json accepts workload parameters as a very complex map, but
 // we want param commands to be used sequentally in
 func (params *WLParameters) MarshalJSON() ([]byte, error) {
-	type jsonPMapEntry struct {
-		Probability float32     `json:"probability"`
-		Value       interface{} `json:"value,omitempty"`
-		ValArray    interface{} `json:"valarray,omitempty"`
-	}
-
-	type jsonParamValue struct {
-		RandGen        *WLParamRandGen `json:"randgen,omitempty"`
-		RandVar        *WLParamRandVar `json:"randvar,omitempty"`
-		ProbabilityMap []jsonPMapEntry `json:"pmap,omitempty"`
-	}
-
 	rawParams := make(map[string]interface{})
 	randomParams := make(map[string]*jsonParamValue)
 
@@ -271,4 +277,107 @@ func (params *WLParameters) MarshalJSON() ([]byte, error) {
 	}
 
 	return json.Marshal(rawParams)
+}
+
+func (params *WLParametersChunk) UnmarshalJSON(data []byte) (err error) {
+	// Unmarshal parameters value. If we get raw value, unmarshal it as-is
+	// If we got object (distinguishable by stating {, decode complex
+	// randomly-generated parameter value
+
+	param := &WLParam{}
+	params.Params = append(params.Params, param)
+
+	if data[0] == '{' {
+		var jsonParam jsonParamValue
+		err = json.Unmarshal(data, &jsonParam)
+		if err != nil {
+			return
+		}
+
+		// Only first param entry (even in probability map) will receive
+		// random generator/variator
+		if jsonParam.RandGen != nil {
+			param.RandGen = *jsonParam.RandGen
+		}
+		if jsonParam.RandVar != nil {
+			param.RandVar = *jsonParam.RandVar
+		}
+		if len(jsonParam.ProbabilityMap) > 0 {
+			for pi, pmapEntry := range jsonParam.ProbabilityMap {
+				param.decodePMapEntry(&pmapEntry)
+
+				if pi < len(jsonParam.ProbabilityMap)-1 {
+					param = &WLParam{}
+					params.Params = append(params.Params, param)
+				}
+			}
+		}
+
+		return
+	}
+
+	param.Values = make([]string, 1)
+	if data[0] == '"' {
+		err = json.Unmarshal(data, &param.Values[0])
+	} else {
+		var i int64
+		err = json.Unmarshal(data, &i)
+
+		param.IsInteger = true
+		param.Values[0] = strconv.FormatInt(i, 10)
+	}
+
+	return
+}
+
+func (params *WLParameters) UnmarshalJSON(data []byte) (err error) {
+	// Usually we get only single entry per parameter, but probability map
+	// is an exception, so we first unmarshal map of name to chunk (1 or more
+	// parameters) then merge them into single array here. WLParametersChunk
+	// have special unmarshaling logic.
+	rawParams := make(map[string]WLParametersChunk)
+
+	err = json.Unmarshal(data, &rawParams)
+	if err != nil {
+		return
+	}
+
+	params.Params = make([]*WLParam, 0, len(rawParams))
+	for paramName, chunk := range rawParams {
+		for pi, _ := range chunk.Params {
+			chunk.Params[pi].Name = paramName
+		}
+
+		params.Params = append(params.Params, chunk.Params...)
+	}
+
+	return
+}
+
+func (param *WLParam) decodePMapEntry(pmapEntry *jsonPMapEntry) error {
+	param.Probability = pmapEntry.Probability
+	if pmapEntry.Value != nil {
+		if reflect.ValueOf(pmapEntry.ValArray).Type().Kind() == reflect.Float64 {
+			param.IsInteger = true
+		}
+		param.Values = append(param.Values, fmt.Sprint(pmapEntry.Value))
+	} else if pmapEntry.ValArray != nil {
+		value := reflect.ValueOf(pmapEntry.ValArray)
+		if value.Type().Kind() != reflect.Slice {
+			return fmt.Errorf("valarray should be an array (encoded as slice)")
+		}
+
+		for i := 0; i < value.Len(); i++ {
+			v := value.Index(i)
+			if v.Type().Kind() == reflect.Float64 {
+				param.IsInteger = true
+			}
+
+			param.Values = append(param.Values, fmt.Sprint(v.Interface()))
+		}
+	} else {
+		return fmt.Errorf("Probability map should have value/valarray")
+	}
+
+	return nil
 }

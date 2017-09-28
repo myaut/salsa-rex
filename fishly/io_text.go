@@ -441,7 +441,7 @@ func (printer *textFormatterBlockPrinter) handleValue(frq *textFormatterRq, valu
 		printer.blockIndex++
 	}
 
-	frq.setBuf(value.Text, fmt.Sprintf(" ?%s=", value.Tag), "? ")
+	frq.setBuf(value.Text, fmt.Sprintf(" %s=", value.Tag), " ")
 	frq.commitBuf()
 }
 

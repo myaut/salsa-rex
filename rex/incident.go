@@ -110,10 +110,9 @@ func (srv *SRVRex) ConfigureIncidentProvider(args *IncidentProviderArgs,
 		return fmt.Errorf("Cannot configure stopped incidents")
 	}
 
-	reply = new(provider.ConfigurationState)
 	*reply = args.State
-
 	err = incident.ConfigureProvider(args.Action, reply)
+
 	return
 }
 
@@ -193,7 +192,7 @@ func (cmd *incidentCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (err
 	}
 
 	if len(copyName) > 0 {
-		err = ctx.client.Call("SRVRex.GetIncident", &opts.Incident, &other)
+		err = ctx.client.Call("SRVRex.GetIncident", &copyName, &other)
 		if err != nil {
 			return
 		}
@@ -211,7 +210,7 @@ func (cmd *incidentCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (err
 		err = ctx.client.Call("SRVRex.CreateIncident", &other, &incident)
 	} else {
 		if len(other.Name) == 0 {
-			// special case for resetting state
+			// special case for resetting state (select <nothing>
 			cliCtx.PushState(true).Reset()
 			ctx.incident = nil
 			return
@@ -226,10 +225,12 @@ func (cmd *incidentCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (err
 
 	// Update state, default path is /incidentName/<prov>
 	// If there is subblock in here, try to execute it
+	state := cliCtx.GetCurrentState()
 	cliCtx.PushState(true).Reset(incident.Name)
 	ctx.incident = &incident
-	if cliCtx.ProcessBlock(rq) != nil {
-		cliCtx.RewindState(-1)
+	ctx.ProviderIndex = -1
+	if cliCtx.ProcessBlock(rq) == nil {
+		cliCtx.RestoreState(state)
 	}
 
 	return
@@ -440,7 +441,7 @@ func (cmd *incidentProviderCmd) IsApplicable(cliCtx *fishly.Context) bool {
 	if ctx.incident.GetState() == rexlib.IncStopped {
 		return false
 	}
-	if cmd.isSet && ctx.providerIndex < 0 {
+	if cmd.isSet && ctx.ProviderIndex < 0 {
 		return false
 	}
 
@@ -462,11 +463,11 @@ func (cmd *incidentProviderCmd) Execute(cliCtx *fishly.Context, rq *fishly.Reque
 	}
 
 	if nextState.Committed != 0 {
-		cliCtx.PushState(true).Reset(ctx.incident.Name)
-		ctx.providerIndex = -1
+		cliCtx.PushState(true)
+		ctx.ProviderIndex = -1
 	} else if !cmd.isSet {
-		cliCtx.PushState(false).Reset(ctx.incident.Name, "prov", fmt.Sprint(nextState.ProviderIndex))
-		ctx.providerIndex = nextState.ProviderIndex
+		cliCtx.PushState(false)
+		ctx.ProviderIndex = nextState.ProviderIndex
 	}
 	return
 }
@@ -486,7 +487,7 @@ func (cmd *incidentProviderCmd) stateFromOptions(state *provider.ConfigurationSt
 		})
 	} else {
 		ctx := cliCtx.External.(*RexContext)
-		state.ProviderIndex = ctx.providerIndex
+		state.ProviderIndex = ctx.ProviderIndex
 	}
 
 	if opts.Committed {

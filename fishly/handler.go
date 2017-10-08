@@ -47,6 +47,9 @@ type handlerDescriptor struct {
 	// Index in type-specific array and type of that array
 	handlerLocalType  handlerType
 	handlerLocalIndex int
+
+	// Reference to handler (for those that only need handler)
+	handler Handler
 }
 
 type handlerTable map[string]*handlerDescriptor
@@ -65,7 +68,7 @@ type optionDescriptorSlice []optionDescriptor
 
 // Helper for Register* functions -- registers handler in global handler
 // array and returns pointer to it
-func (cfg *Config) registerHandler(hType handlerType, index int,
+func (cfg *Config) registerHandler(h Handler, hType handlerType, index int,
 	group, name string) *handlerDescriptor {
 	globalIndex := len(cfg.handlers)
 	cfg.handlers = append(cfg.handlers, handlerDescriptor{
@@ -74,6 +77,7 @@ func (cfg *Config) registerHandler(hType handlerType, index int,
 		handlerGlobalIndex: globalIndex,
 		handlerLocalType:   hType,
 		handlerLocalIndex:  index,
+		handler:            h,
 	})
 
 	return &cfg.handlers[globalIndex]
@@ -81,8 +85,9 @@ func (cfg *Config) registerHandler(hType handlerType, index int,
 
 // Helper for IO registrators -- also saves name of the handler to
 // ioHandlers table
-func (cfg *Config) registerIOHandler(hType handlerType, index int, group, name string) {
-	hdl := cfg.registerHandler(hType, index, group, name)
+func (cfg *Config) registerIOHandler(h Handler, hType handlerType, index int,
+	group, name string) {
+	hdl := cfg.registerHandler(h, hType, index, group, name)
 
 	if cfg.ioHandlers == nil {
 		cfg.ioHandlers = make(handlerTable)
@@ -91,23 +96,23 @@ func (cfg *Config) registerIOHandler(hType handlerType, index int, group, name s
 }
 
 func (cfg *Config) RegisterCommand(cmd Command, group, name string) {
-	cfg.registerHandler(hdlCommand, len(cfg.commands), group, name)
+	cfg.registerHandler(cmd, hdlCommand, len(cfg.commands), group, name)
 	cfg.commands = append(cfg.commands, cmd)
 }
 
 func (cfg *Config) RegisterIOPipe(pipe IOPipe, name string) {
-	cfg.registerIOHandler(hdlIOPipe, len(cfg.pipes), "pipe", name)
+	cfg.registerIOHandler(pipe, hdlIOPipe, len(cfg.pipes), "pipe", name)
 	cfg.pipes = append(cfg.pipes, pipe)
 }
 
 func (cfg *Config) RegisterIOFormatter(fmtr IOFormatter, name string) {
-	cfg.registerIOHandler(hdlIOFormatter, len(cfg.formatters),
+	cfg.registerIOHandler(fmtr, hdlIOFormatter, len(cfg.formatters),
 		"formatter", name)
 	cfg.formatters = append(cfg.formatters, fmtr)
 }
 
 func (cfg *Config) RegisterIOSink(sink IOSink, name string) {
-	cfg.registerIOHandler(hdlIOSink, len(cfg.sinks), "sink", name)
+	cfg.registerIOHandler(sink, hdlIOSink, len(cfg.sinks), "sink", name)
 	cfg.sinks = append(cfg.sinks, sink)
 }
 

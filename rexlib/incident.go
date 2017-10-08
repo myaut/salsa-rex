@@ -13,6 +13,8 @@ import (
 
 	"strings"
 
+	"net/rpc"
+
 	"sync"
 	"sync/atomic"
 
@@ -37,7 +39,7 @@ import (
 const (
 	defaultIncidentTickInterval = 100
 
-	defferedTraceCloseDelay time.Duration = 5 * time.Second
+	incidentDirectoryPermissions = 0755
 )
 
 type IncState int
@@ -56,7 +58,11 @@ type IncidentHandle struct {
 	traceFile *os.File
 	logFile   *os.File
 
+	// For learning incidents -- tsexperiment command
 	tsExperiment *exec.Cmd
+
+	// For monitored incidents -- current connection
+	client *rpc.Client
 }
 
 type IncidentProvider struct {
@@ -78,6 +84,10 @@ type Incident struct {
 	Name string `json:"name"`
 	path string
 
+	// Host where incident was gathered: uses os.Hostname() on tracer, but uses
+	// netloc part of path on monitor (should match them somehow)
+	Host string `json:"host"`
+
 	// Incident's scheduler ticks in milliseconds
 	TickInterval int `json:"tick"`
 
@@ -98,12 +108,13 @@ type Incident struct {
 	// for completed incidents
 	trace       *tsfile.TSFile
 	traceFile   *os.File
-	traceCloser chan struct{}
+	traceCloser *closerWatchdog
 }
 
 type IncidentDescriptor struct {
 	Name        string
 	Description string
+	Host        string
 	State       IncState
 }
 
@@ -126,6 +137,10 @@ var Incidents incidentsState
 func Initialize(path string) {
 	incidentDir = path
 	Incidents.cache = make(map[string]*Incident)
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		os.Mkdir(path, incidentDirectoryPermissions)
+	}
 
 	Incidents.load()
 }
@@ -207,7 +222,8 @@ func (state *incidentsState) GetList() (incidents []IncidentDescriptor, err erro
 		incidents = append(incidents, IncidentDescriptor{
 			Name:        incident.Name,
 			Description: incident.Description,
-			State:       incident.GetState(),
+			Host:        incident.Host,
+			State:       incident.getStateNoLock(),
 		})
 	}
 	return
@@ -293,6 +309,7 @@ func (state *incidentsState) New(other *Incident) (incident *Incident, err error
 
 	// default-initialize it or copy
 	incident.CreatedAt = time.Now()
+	incident.Host, _ = os.Hostname()
 
 	incident.TickInterval = defaultIncidentTickInterval
 	err = incident.Merge(other)
@@ -319,6 +336,10 @@ func (incident *Incident) Merge(other *Incident) error {
 
 	if other.Experiment != nil {
 		incident.Experiment = other.Experiment
+	}
+
+	if len(other.Host) > 0 {
+		incident.Host = other.Host
 	}
 
 	return nil
@@ -388,21 +409,18 @@ func (incident *Incident) getStateNoLock() IncState {
 	return IncCreated
 }
 
-func (incident *Incident) Start() (err error) {
-	incident.mtx.Lock()
-	defer incident.mtx.Unlock()
-
+func (incident *Incident) createHandle() (handle *IncidentHandle, err error) {
 	if incident.getStateNoLock() != IncCreated {
-		return fmt.Errorf("Incident already running or completed, cannot start")
+		return nil, fmt.Errorf("Incident already running or completed, cannot start")
 	}
 
-	handle := new(IncidentHandle)
+	handle = new(IncidentHandle)
 	handle.incident = incident
 
 	err = incident.createTraceFile()
 	if err != nil {
 		handle.Close()
-		return fmt.Errorf("Cannot create trace TS file: %v", err)
+		return nil, fmt.Errorf("Cannot create trace TS file: %v", err)
 	}
 
 	handle.traceFile = incident.traceFile
@@ -412,17 +430,33 @@ func (incident *Incident) Start() (err error) {
 		os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		handle.Close()
-		return fmt.Errorf("Cannot create incident log: %v", err)
+		return nil, fmt.Errorf("Cannot create incident log: %v", err)
 	}
 
 	handle.providerOutput.Log = log.New(handle.logFile, "", log.Ltime|log.Lmicroseconds)
+	return
+}
+
+func (incident *Incident) Start() (err error) {
+	incident.mtx.Lock()
+	defer incident.mtx.Unlock()
+
+	handle, err := incident.createHandle()
 
 	// If we have an experiment here, create a corresponding command
 	handle.tsExperiment = tsload.CreateTSExperimentCommand(incident.path)
 
+	// Set started at timestamps (we should do this with mutex held
+	// so other attempts to start incident will fail)
+	incident.StartedAt = time.Now()
+	if incident.Experiment != nil {
+		incident.Experiment.GlobalTime = incident.StartedAt.UnixNano()
+	}
+	handle.providerOutput.GlobalTime = incident.StartedAt.UnixNano()
+
 	// If we succeeded, run the incident main routine
 	go handle.run()
-	return
+	return nil
 }
 
 func (incident *Incident) Stop() error {
@@ -498,13 +532,6 @@ func (handle *IncidentHandle) run() {
 	var err error
 	incident := handle.incident
 	ilog := handle.providerOutput.Log
-
-	// Set started at timestamp
-	incident.StartedAt = time.Now()
-	if incident.Experiment != nil {
-		incident.Experiment.GlobalTime = incident.StartedAt.UnixNano()
-	}
-	handle.providerOutput.GlobalTime = incident.StartedAt.UnixNano()
 
 	// Save incident (and experiment with timestamp)
 	err = incident.saveBoth()

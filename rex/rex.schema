@@ -67,20 +67,34 @@ type hiobjects tree hiobject {
 type incident struct {
 	var name string
 	var state int
+	var host string
 	var description string
 }
 type incidents array incident {
 	text -table {
 		col -w 28 -hdr NAME name
 		col -w 8 -hdr STATE state
+		col -w 16 -hdr HOST host
 		
 		row description
 	}
 }
 
-
 #
 # Incidents series schema
+
+type seriesStats struct {
+	var tag int 
+	var name string
+	var count int 
+}
+type seriesStatsTable array seriesStats {
+	text -table {
+		col -w 4 -hdr TAG tag
+		col -w 24 -hdr NAME name
+		col -hdr N count
+	}
+}
 
 type seriesEntry struct {
 	var name string

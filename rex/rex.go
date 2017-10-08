@@ -1,19 +1,24 @@
 package main
 
 import (
+	"fmt"
+	"log"
+
 	"os"
+	"os/signal"
 	"os/user"
+	"path/filepath"
+	"syscall"
+
+	"flag"
 
 	"net"
 	"net/rpc"
 
-	"fmt"
-	"log"
-
 	"strconv"
 
 	"fishly"
-	"flag"
+	"rexlib"
 
 	"github.com/go-ini/ini"
 )
@@ -40,6 +45,16 @@ type RexConfig struct {
 	// CLI-related variables
 	cliCfg   fishly.UserConfig
 	cliRLCfg fishly.ReadlineConfig
+
+	// Monitor-related variables
+	monCfg RexMonConfig
+}
+
+type RexMonConfig struct {
+	Key    string
+	User   string
+	Socket string
+	Hosts  []string
 }
 
 func main() {
@@ -52,22 +67,23 @@ func main() {
 	flag.Parse()
 
 	var cfg RexConfig
-	loadConfig(&cfg, *configPath)
+	cfg.load(*mon, *configPath)
 
 	switch {
-	case *trace:
-		cfg.setupRPC()
+	case *mon, *trace:
+		// TODO daemonize
+
+		cfg.setupRPC(*mon)
 		listener := cfg.bindRexSocket()
 		defer listener.Close()
+		defer cfg.unlinkRexSocket()
+		defer rexlib.Shutdown()
 
 		go cfg.serve(listener)
-
-		// TODO: daemonize
-	case *mon:
-		log.Fatalln("Sorry, but rex-mon is not yet implemented")
+		cfg.waitForExitSignal()
 	default:
 		if _, err := os.Stat(cfg.Socket); os.IsNotExist(err) {
-			cfg.setupRPC()
+			cfg.setupRPC(*mon)
 
 			cfg.setUniqueSocketPath()
 			listener := cfg.bindRexSocket()
@@ -75,15 +91,16 @@ func main() {
 
 			go cfg.serveOne(listener)
 		}
+		defer rexlib.Shutdown()
+
+		log.Printf("Welcome to REX CLI [%d]", os.Getpid())
 
 		var ctx RexContext
-		ctx.client = rpc.NewClient(cfg.connectRexSocket())
-
 		ctx.startCLI(&cfg, *autoExec, *initContext)
 	}
 }
 
-func loadConfig(rexCfg *RexConfig, path string) {
+func (rexCfg *RexConfig) load(isMon bool, path string) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		log.Fatalf("Config '%s' doesn't exist", path)
 	}
@@ -98,8 +115,12 @@ func loadConfig(rexCfg *RexConfig, path string) {
 		log.Fatalln(err)
 	}
 
-	cfg.Section("cli").MapTo(&rexCfg.cliCfg)
-	cfg.Section("cli").MapTo(&rexCfg.cliRLCfg)
+	if isMon {
+		cfg.Section("mon").MapTo(&rexCfg.monCfg)
+	} else {
+		cfg.Section("cli").MapTo(&rexCfg.cliCfg)
+		cfg.Section("cli").MapTo(&rexCfg.cliRLCfg)
+	}
 }
 
 func (rexCfg *RexConfig) setUniqueSocketPath() {
@@ -134,8 +155,19 @@ func (rexCfg *RexConfig) bindRexSocket() (listener *net.UnixListener) {
 	return
 }
 
+// Unlinks rex socket from existence
+func (rexCfg *RexConfig) unlinkRexSocket() {
+	os.Remove(rexCfg.Socket)
+}
+
 // Serves as many connections as possible in rex -t mode
 func (rexCfg *RexConfig) serve(listener *net.UnixListener) {
+	if rexlib.IsMonitorMode() {
+		log.Printf("Started daemon in monitoring mode, pid: %d", os.Getpid())
+	} else {
+		log.Printf("Started daemon in tracing mode, pid: %d", os.Getpid())
+	}
+
 	for {
 		conn, err := listener.Accept()
 		if err == nil {
@@ -146,6 +178,8 @@ func (rexCfg *RexConfig) serve(listener *net.UnixListener) {
 
 // Waits for main() goroutine to connect to us and serves it
 func (rexCfg *RexConfig) serveOne(listener *net.UnixListener) {
+	log.Printf("Started standalone tracer, pid: %d", os.Getpid())
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -169,12 +203,26 @@ func (rexCfg *RexConfig) connectRexSocket() (conn *net.UnixConn) {
 	return
 }
 
-func (rexCfg *RexConfig) setupRPC() {
-	srvHI := &SRVHostInfo{}
+func (rexCfg *RexConfig) setupRPC(isMon bool) {
+	srvHI := new(SRVHostInfo)
 	srvHI.initialize()
 	rpc.Register(srvHI)
 
-	srvRex := &SRVRex{}
-	srvRex.initialize(rexCfg.DataDir, rexCfg.TSLoadPath)
+	srvRex := new(SRVRex)
+	srvRex.initialize(filepath.Join(rexCfg.DataDir, "incidents"), rexCfg.TSLoadPath, isMon)
 	rpc.Register(srvRex)
+
+	if isMon {
+		srvMon := new(SRVMon)
+		srvMon.initialize(rexCfg.monCfg, filepath.Join(rexCfg.DataDir, "sox"))
+		rpc.Register(srvMon)
+	}
+}
+
+func (rexCfg *RexConfig) waitForExitSignal() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+
+	s := <-ch
+	log.Print("Got ", s)
 }

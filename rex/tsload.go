@@ -54,6 +54,9 @@ type tsloadCmd struct {
 
 func (cmd *tsloadCmd) IsApplicable(cliCtx *fishly.Context) bool {
 	ctx := cliCtx.External.(*RexContext)
+	if ctx.isMonitor {
+		return false
+	}
 	return ctx.incident != nil
 }
 

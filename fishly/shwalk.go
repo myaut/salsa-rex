@@ -56,11 +56,11 @@ type cmdArgumentParser struct {
 	interpolate cmdOptionInterpolate
 
 	// Argument state and their index
-	args  []cmdToken
-	index int
+	command string
+	args    []cmdToken
+	index   int
 
-	// Base argument index where arguments (not optvals) start
-	baseArgIndex int
+	doValidate bool
 }
 
 func (parser *cmdTokenParser) createRootWalker() *cmdBlockTokenWalker {
@@ -263,41 +263,47 @@ func (walker *cmdCommandTokenWalker) reassembleLines(index int) (lines []string,
 
 func (walker *cmdCommandTokenWalker) parseArgs(optStruct interface{},
 	interpolate cmdOptionInterpolate) *cmdArgumentParser {
+
 	parser := &cmdArgumentParser{
-		args:         walker.getArguments(),
-		interpolate:  interpolate,
-		baseArgIndex: 1,
+		command:     walker.getFirstToken().token,
+		args:        walker.getArguments(),
+		interpolate: interpolate,
+		doValidate:  true,
 	}
+
+	parser.LastError = parser.parse(optStruct)
+	return parser
+}
+
+func (parser *cmdArgumentParser) parse(optStruct interface{}) (err error) {
 	if reflect.TypeOf(optStruct).Kind() != reflect.Ptr {
-		parser.LastError = fmt.Errorf("invalid type of options struct, pointer expected")
-		return parser
+		return fmt.Errorf("invalid type of options struct, pointer expected")
 	}
 	if reflect.ValueOf(optStruct).IsNil() {
 		if len(parser.args) == 0 {
-			return parser
+			return nil
 		}
-		parser.LastError = fmt.Errorf("arguments and options are not accepted in this context")
-		return parser
+		return fmt.Errorf("arguments and options are not accepted in this context")
 	}
 
+	// Base argument index where arguments (not optvals) start
+	baseArgIndex := 1
+	// Have we parsed arguments already and no longer accept options?
 	optMode := true
 
-	descriptor := generateOptionStructDescriptor(optStruct, walker.getFirstToken().token)
-loop:
+	descriptor := generateOptionStructDescriptor(optStruct, parser.command)
 	for parser.index = 0; parser.index < len(parser.args); parser.index++ {
 		token := parser.args[parser.index]
 		var opt *cmdOption
 		switch token.tokenType {
 		case tOption:
 			if !optMode {
-				parser.LastError = fmt.Errorf("unexpected option after arguments")
-				break loop
+				return fmt.Errorf("unexpected option after arguments")
 			}
 			if optIndex, ok := descriptor.optMap[token.token]; ok {
 				opt = &descriptor.options[optIndex]
 			} else {
-				parser.LastError = fmt.Errorf("unknown option")
-				break loop
+				return fmt.Errorf("unknown option")
 			}
 
 			if !opt.setSpecified() {
@@ -307,50 +313,48 @@ loop:
 				value := parser.assembleArgument()
 				if parser.LastError != nil {
 					parser.index = optTokenIndex
-					break loop
+					return parser.LastError
 				}
 
-				parser.LastError = opt.setValue(value)
-				parser.baseArgIndex++
+				err = opt.setValue(value)
+				if err != nil {
+					return
+				}
+
+				baseArgIndex++
 			}
 		case tRawArgument, tSingleQuotedArgument, tDoubleQuotedArgument:
 			if len(descriptor.args) == 0 {
-				parser.LastError = fmt.Errorf("unexpected argument")
-				break loop
+				return fmt.Errorf("unexpected argument")
 			}
 
 			optMode = false
-			argIndex := token.argIndex - parser.baseArgIndex
+			argIndex := token.argIndex - baseArgIndex
 			if argIndex >= len(descriptor.args) {
 				// Try to append to last argument (if it is slice), if it is not,
 				// we will fail on specified check
 				argIndex = len(descriptor.args) - 1
 			}
 			if argIndex < 0 {
-				parser.LastError = fmt.Errorf("invalid argument index %d", argIndex)
-				break loop
+				return fmt.Errorf("invalid argument index %d", argIndex)
 			}
 			opt = &descriptor.args[argIndex]
 
 			value := parser.assembleArgument()
-			if parser.LastError != nil {
-				break loop
-			}
-
-			parser.LastError = opt.setValue(value)
+			err = opt.setValue(value)
 		default:
-			parser.LastError = fmt.Errorf("unexpected token, only options and arguments expected")
+			err = fmt.Errorf("unexpected token, only options and arguments expected")
 		}
 
-		if parser.LastError != nil {
-			break loop
+		if err != nil {
+			break
 		}
 	}
 
-	if parser.LastError == nil {
+	if parser.doValidate {
 		parser.validate(descriptor)
 	}
-	return parser
+	return
 }
 
 // Assembles multiple tokens of argument types with same argIndex into
@@ -486,22 +490,22 @@ func (descriptor *cmdOptionStructDescriptor) parseFlags(tag, command string) []s
 }
 
 // Checks that all necessary options were specified
-func (parser *cmdArgumentParser) validate(descriptor cmdOptionStructDescriptor) {
+func (parser *cmdArgumentParser) validate(descriptor cmdOptionStructDescriptor) (err error) {
 	for optIndex, opt := range descriptor.options {
 		if opt.isMissing() {
 			aliases := descriptor.getOptionAliases(optIndex)
-			parser.LastError = fmt.Errorf("missing one of the options: %s",
+			return fmt.Errorf("missing one of the options: %s",
 				strings.Join(aliases, "|"))
-			return
 		}
 	}
 
 	for argIndex, arg := range descriptor.args {
 		if arg.isMissing() {
-			parser.LastError = fmt.Errorf("missing argument #%d", argIndex+1)
-			return
+			return fmt.Errorf("missing argument #%d", argIndex+1)
 		}
 	}
+
+	return
 }
 
 // We rarely need list of options (help and error checking), so we do not cache

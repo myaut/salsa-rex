@@ -21,11 +21,19 @@ import (
 
 type SRVRex struct{}
 
-func (srv *SRVRex) initialize(path string, tsloadPath string) {
+func (srv *SRVRex) initialize(path string, tsloadPath string, isMon bool) {
 	rexlib.Initialize(path)
-	tsload.SetTSLoadPath(tsloadPath)
+
+	if !isMon {
+		tsload.SetTSLoadPath(tsloadPath)
+	}
 
 	gob.Register(&IncidentProviderArgs{})
+}
+
+func (srv *SRVRex) IsMonitorMode(arg *struct{}, reply *bool) error {
+	*reply = rexlib.IsMonitorMode()
+	return nil
 }
 
 func (srv *SRVRex) CreateIncident(other *rexlib.Incident, reply *rexlib.Incident) (err error) {
@@ -120,15 +128,26 @@ func (srv *SRVRex) ConfigureIncidentProvider(args *IncidentProviderArgs,
 // CLI
 
 // For auto-complete thingy
-func (ctx *RexContext) getIncidentNames() (names []string) {
+func (ctx *RexContext) getIncidentNames(hostName string) (names []string) {
 	var incidents []rexlib.IncidentDescriptor
-	err := ctx.client.Call("SRVRex.GetIncidentList", &struct{}{}, &incidents)
+
+	var err error
+	if len(hostName) == 0 {
+		err = ctx.client.Call("SRVRex.GetIncidentList", &struct{}{}, &incidents)
+	} else {
+		err = ctx.client.Call("SRVMon.GetIncidentList", &hostName, &incidents)
+	}
 
 	if err == nil {
 		for _, incident := range incidents {
 			names = append(names, incident.Name)
 		}
 	}
+	return
+}
+
+func (ctx *RexContext) getMonitoredHosts() (hosts []string) {
+	ctx.client.Call("SRVMon.GetMonitoredHosts", &struct{}{}, &hosts)
 	return
 }
 
@@ -153,9 +172,7 @@ func (ctx *RexContext) saveIncident() (err error) {
 // selects old incident
 //
 
-type incidentCmd struct {
-	fishly.GlobalCommand
-
+type incidentSelectCmd struct {
 	doCreate bool
 }
 
@@ -166,21 +183,32 @@ type incidentCmdOpt struct {
 	Incident string `arg:"1,opt"`
 }
 
-func (cmd *incidentCmd) NewOptions(ctx *fishly.Context) interface{} {
+func (cmd *incidentSelectCmd) NewOptions(ctx *fishly.Context) interface{} {
 	return new(incidentCmdOpt)
 }
 
-func (cmd *incidentCmd) Complete(cliCtx *fishly.Context, rq *fishly.CompleterRequest) {
+func (cmd *incidentSelectCmd) IsApplicable(cliCtx *fishly.Context) bool {
+	ctx := cliCtx.External.(*RexContext)
+	if ctx.isMonitor {
+		// Only select incidents is supported by monitors
+		return !cmd.doCreate
+	}
+
+	return true
+}
+
+func (cmd *incidentSelectCmd) Complete(cliCtx *fishly.Context, rq *fishly.CompleterRequest) {
 	switch rq.ArgIndex {
 	case 1:
 		ctx := cliCtx.External.(*RexContext)
-		rq.AddOptions(ctx.getIncidentNames()...)
+		rq.AddOptions(ctx.getIncidentNames("")...)
 	}
 }
 
-func (cmd *incidentCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (err error) {
-	var incident, other rexlib.Incident
+func (cmd *incidentSelectCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (err error) {
 	var incidentName, copyName string
+	incident := new(rexlib.Incident)
+	other := new(rexlib.Incident)
 
 	// load other incident
 	ctx := cliCtx.External.(*RexContext)
@@ -227,7 +255,7 @@ func (cmd *incidentCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (err
 	// If there is subblock in here, try to execute it
 	state := cliCtx.GetCurrentState()
 	cliCtx.PushState(true).Reset(incident.Name)
-	ctx.incident = &incident
+	ctx.incident = incident
 	ctx.ProviderIndex = -1
 	if cliCtx.ProcessBlock(rq) == nil {
 		cliCtx.RestoreState(state)
@@ -240,9 +268,18 @@ func (cmd *incidentCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (err
 // 'ls' command lists incidents when in super-root context
 //
 
-type incidentListCmd struct {
-	fishly.HandlerWithoutOptions
-	fishly.HandlerWithoutCompletion
+type incidentListCmd struct{}
+type incidentListOpt struct {
+	Host string `opt:"h|host,opt"`
+}
+
+func (cmd *incidentListCmd) NewOptions(cliCtx *fishly.Context) interface{} {
+	ctx := cliCtx.External.(*RexContext)
+	if ctx.isMonitor {
+		return new(incidentListOpt)
+	}
+
+	return &struct{}{}
 }
 
 func (cmd *incidentListCmd) IsApplicable(cliCtx *fishly.Context) bool {
@@ -250,13 +287,35 @@ func (cmd *incidentListCmd) IsApplicable(cliCtx *fishly.Context) bool {
 	return ctx.incident == nil && len(cliCtx.GetCurrentState().Variables) == 0
 }
 
+func (cmd *incidentListCmd) Complete(cliCtx *fishly.Context, rq *fishly.CompleterRequest) {
+	ctx := cliCtx.External.(*RexContext)
+
+	switch rq.Option {
+	case "host":
+		hosts := ctx.getMonitoredHosts()
+		rq.AddOptions(hosts...)
+	}
+}
+
 func (cmd *incidentListCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (err error) {
 	var incidents []rexlib.IncidentDescriptor
 
 	ctx := cliCtx.External.(*RexContext)
-	err = ctx.client.Call("SRVRex.GetIncidentList", &struct{}{}, &incidents)
+
+	var host string
+	if ctx.isMonitor {
+		opt := rq.Options.(*incidentListOpt)
+		host = opt.Host
+	}
+
+	// Retrieve list of incidents from local host or forwarded by monitor
+	if len(host) > 0 {
+		err = ctx.client.Call("SRVMon.GetIncidentList", &host, &incidents)
+	} else {
+		err = ctx.client.Call("SRVRex.GetIncidentList", &struct{}{}, &incidents)
+	}
 	if err != nil {
-		return err
+		return
 	}
 
 	ioh, err := rq.StartOutput(cliCtx, false)
@@ -271,6 +330,7 @@ func (cmd *incidentListCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) 
 
 		ioh.WriteString("name", incident.Name)
 		ioh.WriteFormattedValue("state", cmd.formatIncidentState(incident.State), incident.State)
+		ioh.WriteString("host", incident.Host)
 		if len(incident.Description) > 0 {
 			ioh.WriteString("description", incident.Description)
 		}
@@ -278,6 +338,7 @@ func (cmd *incidentListCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) 
 		ioh.EndObject()
 	}
 	ioh.EndObject()
+
 	return
 }
 
@@ -326,6 +387,10 @@ func (cmd *incidentSetCmd) NewOptions(cliCtx *fishly.Context) interface{} {
 
 func (cmd *incidentSetCmd) IsApplicable(cliCtx *fishly.Context) bool {
 	ctx := cliCtx.External.(*RexContext)
+	if ctx.isMonitor {
+		return false
+	}
+
 	if ctx.refreshIncident() != nil {
 		return false
 	}
@@ -395,7 +460,7 @@ func (cmd *incidentRemoveCmd) NewOptions(cliCtx *fishly.Context) interface{} {
 func (cmd *incidentRemoveCmd) Complete(cliCtx *fishly.Context, rq *fishly.CompleterRequest) {
 	if rq.ArgIndex >= 1 {
 		ctx := cliCtx.External.(*RexContext)
-		rq.AddOptions(ctx.getIncidentNames()...)
+		rq.AddOptions(ctx.getIncidentNames("")...)
 	}
 }
 
@@ -434,10 +499,12 @@ func (cmd *incidentProviderCmd) Complete(cliCtx *fishly.Context, rq *fishly.Comp
 
 func (cmd *incidentProviderCmd) IsApplicable(cliCtx *fishly.Context) bool {
 	ctx := cliCtx.External.(*RexContext)
+	if ctx.isMonitor {
+		return false
+	}
 	if ctx.refreshIncident() != nil {
 		return false
 	}
-
 	if ctx.incident.GetState() == rexlib.IncStopped {
 		return false
 	}

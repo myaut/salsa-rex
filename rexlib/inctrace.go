@@ -12,6 +12,10 @@ import (
 	"tsfile"
 )
 
+const (
+	defferedTraceCloseDelay time.Duration = 5 * time.Second
+)
+
 func (incident *Incident) createTraceFile() (err error) {
 	incident.traceFile, err = os.Create(filepath.Join(incident.path, "trace.tsf"))
 	if err == nil {
@@ -29,14 +33,14 @@ func (incident *Incident) GetTraceFile() (tsf *tsfile.TSFile, err error) {
 	if incident.traceFile == nil {
 		err = incident.loadTraceFile()
 	} else {
-		incident.traceCloser <- struct{}{}
+		incident.traceCloser.Notify()
 	}
 	return incident.trace, err
 }
 
 func (incident *Incident) loadTraceFile() (err error) {
 	if incident.traceCloser == nil {
-		incident.traceCloser = make(chan struct{})
+		incident.traceCloser = newCloserWatchdog(defferedTraceCloseDelay)
 	}
 
 	incident.traceFile, err = os.Open(filepath.Join(incident.path, "trace.tsf"))
@@ -45,21 +49,7 @@ func (incident *Incident) loadTraceFile() (err error) {
 	}
 
 	go func(incident *Incident) {
-		ticker := time.NewTicker(defferedTraceCloseDelay)
-		defer ticker.Stop()
-
-	loop:
-		for {
-			// Automatically close opened trace after 5 seconds of inactivity
-			// If there is activity, we recieve a message over traceCloser,
-			// and reset the timer
-			select {
-			case <-ticker.C:
-				break loop
-			case <-incident.traceCloser:
-				ticker = time.NewTicker(defferedTraceCloseDelay)
-			}
-		}
+		incident.traceCloser.Wait()
 
 		incident.mtx.Lock()
 		defer incident.mtx.Unlock()

@@ -14,11 +14,15 @@ type Completer struct {
 }
 
 type completerRq struct {
-	ctx *Context
+	ctx    *Context
+	parser *cmdTokenParser
 
 	handler  *handlerDescriptor
 	options  []string
 	argIndex int
+
+	startIndex int
+	endIndex   int
 
 	prefix  string
 	newLine [][]rune
@@ -55,17 +59,35 @@ func (rq *CompleterRequest) AddOptions(options ...string) {
 	}
 }
 
+// Tries to parse options that already specified (prior to completing option)
+func (rq *CompleterRequest) GetExistingOptions() interface{} {
+	state := rq.rq
+	if state.handler == nil || state.startIndex >= state.endIndex {
+		return nil
+	}
+
+	opt := state.handler.handler.NewOptions(state.ctx)
+	if opt != nil {
+		parser := &cmdArgumentParser{
+			command:     state.handler.name,
+			args:        state.parser.Tokens[state.startIndex:state.endIndex],
+			interpolate: state.ctx.interpolateArgument,
+		}
+		parser.parse(opt)
+	}
+
+	return opt
+}
+
 // Returns deadline for auto-completer request
 func (rq *CompleterRequest) GetDeadline() time.Time {
 	return time.Now().Add(700 * time.Millisecond)
 }
 
 func (completer *Completer) Do(line []rune, pos int) (newLine [][]rune, length int) {
-	root := completerRq{
-		ctx: completer.ctx,
-	}
 	if len(line) == 0 {
 		// Special case when no token is specified
+		root := completerRq{ctx: completer.ctx}
 		return root.complete(cmdToken{
 			tokenType: tCommand,
 		})
@@ -84,15 +106,21 @@ func (completer *Completer) Do(line []rune, pos int) (newLine [][]rune, length i
 		return [][]rune{[]rune{parser.lastDelimiter}}, 1
 	}
 
+	root := completerRq{
+		ctx:    completer.ctx,
+		parser: parser,
+	}
 	state := root
-	for _, token := range parser.Tokens {
+	for tokenIndex, token := range parser.Tokens {
 		switch token.tokenType {
 		case tCommandSeparator:
 			state = root
 		case tRedirection:
 			state.handler, _ = completer.ctx.cfg.ioHandlers[token.token]
+			state.startIndex = tokenIndex + 1
 		case tCommand:
 			state.handler, _ = completer.ctx.availableCommands[token.token]
+			state.startIndex = tokenIndex + 1
 		case tOption:
 			state.options = append(state.options, token.token)
 		case tRawArgument, tSingleQuotedArgument, tDoubleQuotedArgument:
@@ -108,11 +136,13 @@ func (completer *Completer) Do(line []rune, pos int) (newLine [][]rune, length i
 			if prefixLen <= len(token.token) {
 				token.token = token.token[:prefixLen]
 			}
+			state.endIndex = tokenIndex
 			return state.complete(token)
 		}
 	}
 
 	state.argIndex++
+	state.endIndex = len(parser.Tokens)
 	return state.complete(cmdToken{
 		tokenType: tRawArgument,
 		argIndex:  state.argIndex,

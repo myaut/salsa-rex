@@ -16,22 +16,7 @@ const (
 // --------------
 // SRV
 
-type IncidentEventArgs struct {
-	// Input arguments: name of incident and page tag for series
-	Incident string
-	Tag      tsfile.TSFPageTag
-
-	// Entries range to retrieve
-	Start int
-	Count int
-}
-
-type IncidentEventReply struct {
-	Schema *tsfile.TSFSchemaHeader
-	Data   [][]byte
-}
-
-func (srv *SRVRex) GetEvents(args *IncidentEventArgs, reply *IncidentEventReply) (err error) {
+func (srv *SRVRex) GetEvents(args *rexlib.IncidentEventArgs, reply *rexlib.IncidentEventReply) (err error) {
 	incident, err := rexlib.Incidents.Get(args.Incident)
 	if err != nil {
 		return
@@ -56,6 +41,48 @@ func (srv *SRVRex) GetEvents(args *IncidentEventArgs, reply *IncidentEventReply)
 // CLI
 
 //
+// 'ls' subcommand in incident context lists series and its stats
+//
+
+type incidentSeriesListCmd struct {
+	fishly.HandlerWithoutOptions
+	fishly.HandlerWithoutCompletion
+}
+
+func (cmd *incidentSeriesListCmd) IsApplicable(cliCtx *fishly.Context) bool {
+	ctx := cliCtx.External.(*RexContext)
+	return ctx.incident != nil
+}
+
+func (cmd *incidentSeriesListCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request) (err error) {
+	ctx := cliCtx.External.(*RexContext)
+	err = ctx.refreshIncident()
+	if err != nil {
+		return err
+	}
+
+	ioh, err := rq.StartOutput(cliCtx, false)
+	if err != nil {
+		return
+	}
+	defer ioh.CloseOutput()
+
+	ioh.StartObject("seriesStatsTable")
+	for _, seriesData := range ctx.incident.TraceStats.Series {
+		ioh.StartObject("seriesStats")
+
+		ioh.WriteRawValue("tag", seriesData.Tag)
+		ioh.WriteString("name", seriesData.Name)
+		ioh.WriteRawValue("count", seriesData.Count)
+
+		ioh.EndObject()
+	}
+	ioh.EndObject()
+
+	return
+}
+
+//
 // 'get' subcommand -- gets entries
 //
 
@@ -67,8 +94,8 @@ type incidentGetOpt struct {
 }
 
 type incidentGetSeries struct {
-	args  IncidentEventArgs
-	reply IncidentEventReply
+	args  rexlib.IncidentEventArgs
+	reply rexlib.IncidentEventReply
 
 	name    string
 	count   uint
@@ -213,7 +240,7 @@ func (cmd *incidentGetCmd) getNextSeries(ctx *RexContext, series []incidentGetSe
 			}
 
 			// Retrieve some entries or fail
-			var reply IncidentEventReply
+			var reply rexlib.IncidentEventReply
 			err := ctx.client.Call("SRVRex.GetEvents", &seriesData.args, &reply)
 			if err != nil {
 				return nil, err

@@ -1,0 +1,51 @@
+; Very simple actor -- computes distance between two values as | %a - %b |
+.ACTOR distance
+	.REG %a random
+	.REG %b random
+	.REG %c random		; | %a - %b |
+	; .TRANS %a %b
+	
+	.ENTRY %a %b
+		%c = %a - %b
+		%c = abs %c
+.AEND
+
+; Regression analyzer tries to find linear regression of two dependent 
+; input variables %a and %b
+.ACTOR regr_lin
+	.REG %a random
+	.REG %b random
+	.REG %c random		; ratio between %a and %b
+	.REG %o1 random		; regression error compared to last ratio
+	.REG %s0 static last
+	; .TRANS %a %b
+
+	.ENTRY %a %b
+		a = %a << 16
+		%c = a / %b
+		:END if last == 0
+			%o1 = last - cur
+			%o1 = abs %o1
+		:END
+		last = %c
+.AEND
+
+; Average aggregator -- accumulates mean for variable %a for the duration of 
+; window and returns it on window signal as %c
+.ACTOR aggr_avg
+	.REG %a random
+	.REG %c random		; mean of %a during last window
+	.REG %s0 static sum
+	.REG %s1 static count
+	
+	.ENTRY %a
+		sum = sum + %a
+		count ++
+	
+	.ENTRY %t
+		:END if count == 0
+			%c = sum / count
+			sum = 0
+			count = 0
+		:END
+.AEND

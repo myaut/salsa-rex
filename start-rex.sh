@@ -63,5 +63,5 @@ while ! [ -S $MONSOCK ] ; do
 	sleep 0.1
 done
 
-$REX -config $MONCFG 
+$REX -config $MONCFG "$@"
 

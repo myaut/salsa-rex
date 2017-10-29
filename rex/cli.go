@@ -18,6 +18,9 @@ type RexContext struct {
 
 	TSLoadExperimentMode bool   `ctxvar:"tsload"`
 	TSLoadWorkload       string `ctxvar:"workload"`
+
+	trainingSession *rexlib.TrainingSession
+	TrainingMode    bool `ctxpath:"training"`
 }
 
 func (ctx *RexContext) Connect() {
@@ -27,6 +30,21 @@ func (ctx *RexContext) Connect() {
 
 func (ctx *RexContext) Update(cliCtx *fishly.Context) (err error) {
 	path := cliCtx.GetCurrentState().Path
+	cliCtx.Prompt = cliCtx.GetCurrentState().URL().String()
+
+	if ctx.TrainingMode {
+		if len(path) > 1 {
+			ctx.trainingSession = new(rexlib.TrainingSession)
+			err = ctx.client.Call("SRVYa.GetTrainingSession", &path[1], ctx.trainingSession)
+			if err != nil {
+				ctx.trainingSession = nil
+				return
+			}
+		}
+
+		ctx.incident = nil
+		return
+	}
 
 	if len(path) > 0 {
 		if ctx.incident == nil || ctx.incident.Name != path[0] {
@@ -41,7 +59,6 @@ func (ctx *RexContext) Update(cliCtx *fishly.Context) (err error) {
 		ctx.incident = nil
 	}
 
-	cliCtx.Prompt = cliCtx.GetCurrentState().URL().String()
 	return
 }
 
@@ -105,5 +122,12 @@ func (ctx *RexContext) registerCommands(cliCfg *fishly.Config) {
 		cliCfg.RegisterCommand(&tsloadWLStepsCmd{}, "tsload", "steps")
 	} else {
 		cliCfg.RegisterCommand(&incidentImportCmd{}, "incident", "import")
+
+		cliCfg.RegisterCommand(&incidentTrainingCmd{}, "incident", "train")
+
+		cliCfg.RegisterCommand(&toggleTrainingCmd{}, "training", "training")
+		cliCfg.RegisterCommand(&trainingListCmd{}, "training", "ls")
+		cliCfg.RegisterCommand(&trainingRemoveCmd{}, "training", "rm")
+
 	}
 }

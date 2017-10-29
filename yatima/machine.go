@@ -70,10 +70,13 @@ const (
 )
 
 const (
-	nearJumpRegister = RL0
+	nearJumpRegister = RI0
 )
 
 const (
+	// Note: when adding new instruction, do not forget to update
+	// instructionDefinitions array in assembler.go
+
 	NOP InstructionCode = iota
 
 	// Special instructions for handling subprograms. Cannot be generated

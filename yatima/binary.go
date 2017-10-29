@@ -18,11 +18,18 @@ const (
 	BDValues
 	BDRegisterHint
 	BDRegisterName
+	BDRegisterTransitiveHint
 	BDEntryPoint
 
-	// this is "YAB0" in little endian
-	yabMagic = 0x30424159
+	BDModel
+	BDPinCluster
+	BDPinGroup
+	BDPin
 )
+
+// this is "YAB0" in little endian
+const yabMagic = 0x30424159
+const sizeofDirective = 16
 
 type BinaryDirective struct {
 	Type BinaryDirectiveType
@@ -50,7 +57,7 @@ type BDBlock struct {
 }
 
 type BinaryReader struct {
-	reader    io.Reader
+	reader    io.ReadSeeker
 	strReader io.ReadSeeker
 
 	length uint32
@@ -92,7 +99,7 @@ func (yabw *BinaryWriter) Close() error {
 			return fmt.Errorf("Not enough bytes written for a string")
 		}
 	}
-	yabw.writer.Write(bytes.Repeat([]byte{'\000'}, 16-int(yabw.strOff%16)))
+	yabw.writer.Write(bytes.Repeat([]byte{'\000'}, sizeofDirective-int(yabw.strOff%sizeofDirective)))
 
 	// Finally, update header in the beginning of the file
 	_, err = yabw.writer.Seek(0, io.SeekStart)
@@ -102,7 +109,7 @@ func (yabw *BinaryWriter) Close() error {
 
 	hdr := BinaryDirective{
 		Type:   yabMagic,
-		Length: uint32(offset / 16),
+		Length: uint32(offset / sizeofDirective),
 	}
 	return yabw.write(hdr)
 }
@@ -141,6 +148,13 @@ func (yabw *BinaryWriter) AddProgram(prog *Program) (err error) {
 			})
 		}
 	}
+	for _, hint := range prog.TransHints {
+		preamble = append(preamble, BinaryDirective{
+			Type: BDRegisterTransitiveHint,
+			P0:   uint32(hint.Register0),
+			P1:   uint32(hint.Register1),
+		})
+	}
 	for _, ep := range prog.EntryPoints {
 		preamble = append(preamble, BinaryDirective{
 			Type: BDEntryPoint,
@@ -152,7 +166,7 @@ func (yabw *BinaryWriter) AddProgram(prog *Program) (err error) {
 
 	// Compute total length of the program including values
 	valLength, valPad := len(prog.Values)/2, false
-	if len(prog.Values)%2 == 1 {
+	if len(prog.Values)%2 != 0 {
 		valLength++ // Round up as last value will be written with padding
 		valPad = true
 	}
@@ -202,13 +216,49 @@ func (yabw *BinaryWriter) AddProgram(prog *Program) (err error) {
 	return yabw.write(&BinaryDirective{Type: BDProgramEnd})
 }
 
-func NewReader(reader io.Reader, strReader io.ReadSeeker) (*BinaryReader, error) {
+func (yabw *BinaryWriter) AddModel(model *Model) (err error) {
+	dirs := make([]BinaryDirective, 1, 64)
+	dirs[0] = BinaryDirective{
+		Type: BDModel,
+	}
+
+	for _, cluster := range model.Pins {
+		dirs = append(dirs, BinaryDirective{
+			Type: BDPinCluster,
+			P0:   yabw.addString(cluster.Name),
+		})
+		cdir := &dirs[len(dirs)-1]
+
+		for _, group := range cluster.Groups {
+			dirs = append(dirs, BinaryDirective{
+				Type: BDPinGroup,
+				P0:   yabw.addString(group.Name),
+			})
+			gdir := &dirs[len(dirs)-1]
+
+			for _, pin := range group.Pins {
+				dirs = append(dirs, BinaryDirective{
+					Type: BDPin,
+					P0:   yabw.addString(pin.Name),
+					P1:   uint32(pin.Hint),
+				})
+				gdir.Length++
+			}
+			cdir.Length += gdir.Length + 1
+		}
+		dirs[0].Length += cdir.Length + 1
+	}
+
+	return yabw.write(dirs)
+}
+
+func NewReader(reader io.ReadSeeker, strReader io.ReadSeeker) (*BinaryReader, error) {
 	yabr := &BinaryReader{
 		reader:    reader,
 		strReader: strReader,
 	}
 
-	var hdrRaw [16]byte
+	var hdrRaw [sizeofDirective]byte
 	_, err := reader.Read(hdrRaw[:])
 	if err != nil {
 		return nil, err
@@ -254,7 +304,7 @@ func (yabr *BinaryReader) updateCounters(offset, lenOff int) {
 
 func (yabr *BinaryReader) getBlock() (block BDBlock) {
 	last := len(yabr.stack) - 1
-	if last > 0 {
+	if last >= 0 {
 		block = yabr.stack[last]
 	}
 
@@ -271,6 +321,16 @@ func (yabr *BinaryReader) read(data interface{}) error {
 	}
 
 	return binary.Read(yabr.reader, binary.LittleEndian, data)
+}
+
+// Ignores current block and rewinds to the next directive
+func (yabr *BinaryReader) IgnoreBlock() (err error) {
+	length := yabr.getBlock().Length
+
+	_, err = yabr.reader.Seek(int64(length*sizeofDirective), io.SeekCurrent)
+	yabr.updateCounters(length, length)
+
+	return
 }
 
 // Reads directive from the input stream (or takes last unread directive)
@@ -353,7 +413,7 @@ func (yabr *BinaryReader) ReadValuesPair() (values []int64, err error) {
 }
 
 func (yabr *BinaryReader) ReadString(off uint32) (str string) {
-	_, err := yabr.strReader.Seek(int64(off+yabr.length*16), io.SeekStart)
+	_, err := yabr.strReader.Seek(int64(off+yabr.length*sizeofDirective), io.SeekStart)
 	if err != nil {
 		return ""
 	}
@@ -361,17 +421,100 @@ func (yabr *BinaryReader) ReadString(off uint32) (str string) {
 	buf := bytes.NewBuffer([]byte{})
 readLoop:
 	for {
-		var tmp [16]byte
+		var tmp [sizeofDirective]byte
 		yabr.strReader.Read(tmp[:])
-		buf.Write(tmp[:])
 
-		for _, b := range tmp {
+		for i, b := range tmp {
 			if b == '\000' {
+				buf.Write(tmp[:i])
 				break readLoop
 			}
 		}
+
+		buf.Write(tmp[:])
 	}
 
-	str, _ = buf.ReadString('\000')
-	return
+	return buf.String()
+}
+
+// Reads program which goes after current BDProgram directive (no need for
+// UnreadDirective())
+func (yabr *BinaryReader) ReadProgram() (*Program, error) {
+	prog := &Program{
+		Name: yabr.ReadString(yabr.lastDirective.P0),
+	}
+
+	block := yabr.getBlock()
+	if block.Type != BDProgram || block.Offset > 0 {
+		return nil, fmt.Errorf("ReadProgram() should be called after program directive")
+	}
+
+	for block.Length > 0 {
+		dir, err := yabr.ReadDirective()
+		if err != nil {
+			return nil, err
+		}
+
+		switch dir.Type {
+		case BDRegisterHint:
+			prog.Hints = append(prog.Hints, RegisterHint{
+				Register: RegisterIndex(dir.P0),
+				Hint:     RegisterHintType(dir.P1),
+			})
+		case BDRegisterName:
+			reg := RegisterIndex(dir.P0)
+			for index, hint := range prog.Hints {
+				if hint.Register == reg {
+					prog.Hints[index].Name = yabr.ReadString(dir.P1)
+				}
+			}
+		case BDRegisterTransitiveHint:
+			prog.TransHints = append(prog.TransHints, RegisterTransitiveHint{
+				Register0: RegisterIndex(dir.P0),
+				Register1: RegisterIndex(dir.P1),
+			})
+		case BDEntryPoint:
+			prog.EntryPoints = append(prog.EntryPoints, EntryPoint{
+				Register: RegisterIndex(dir.P0),
+				Address:  int(dir.P1),
+			})
+		case BDProgramBody:
+			prog.Instructions = make([]Instruction, dir.Length)
+			err = yabr.read(prog.Instructions)
+			if err != nil {
+				return nil, err
+			}
+
+			yabr.updateCounters(int(dir.Length), int(dir.Length))
+		case BDValues:
+			prog.Values = make([]int64, dir.P0)
+			err = yabr.read(prog.Values)
+			if err != nil {
+				return nil, err
+			}
+			if dir.P0%2 != 0 {
+				// Read padding value if it was provided
+				var pad int64
+				yabr.read(&pad)
+			}
+
+			yabr.updateCounters(int(dir.Length), int(dir.Length))
+		default:
+			return nil, fmt.Errorf("Unknown directive %x at offset %x", dir.Type, yabr.offset)
+		}
+
+		block = yabr.getBlock()
+	}
+
+	end, err := yabr.ReadDirective()
+	if err != nil {
+		return nil, err
+	}
+	if end.Type != BDProgramEnd {
+		yabr.UnreadDirective()
+		return nil, fmt.Errorf("Missing .AEND as the last directive at offset %x",
+			yabr.offset)
+	}
+
+	return prog, nil
 }

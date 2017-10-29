@@ -98,11 +98,25 @@ type seriesStatsTable array seriesStats {
 
 type seriesEntry struct {
 	var name string
+	var start_time string 
+	var end_time string
 }
 type series array seriesEntry {
 	text -table {
 		col -w 12 -hdr NAME name
 		col -w 18 -hdr Ts   start_time
 		col -w 18 -hdr Te   end_time
+	}
+}
+
+#
+# Training sessions schema 
+
+type session struct {
+	var name string
+}
+type sessions array session {
+	text -table {
+		col -w 12 -hdr NAME name
 	}
 }

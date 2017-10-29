@@ -30,7 +30,7 @@ func dumpFile(inFile string) (err error) {
 
 	for {
 		block, off, depth := yabr.GetState()
-		data, err := decodeDirective(yabr, block)
+		data, rawData, err := decodeDirective(yabr, block)
 
 		if err == io.EOF {
 			break
@@ -47,39 +47,43 @@ func dumpFile(inFile string) (err error) {
 			address = fmt.Sprintf("+%x", block.Offset)
 		}
 
-		fmt.Printf("%6x %3s | ", off, address)
+		fmt.Printf("%6x %3s | %24s | ", off, address, rawData)
 		fmt.Println(indent, data)
 	}
 
 	return
 }
 
-func decodeDirective(yabr *yatima.BinaryReader, block yatima.BDBlock) (data string, err error) {
+func decodeDirective(yabr *yatima.BinaryReader, block yatima.BDBlock) (data, rawData string, err error) {
 	switch block.Type {
 	case yatima.BDProgramBody:
 		instr, err := yabr.ReadInstruction()
 
-		return instr.Disassemble(), err
+		rawData = fmt.Sprintf("%4x %4x %4x %4x", instr.I, instr.RI0, instr.RI1, instr.RO)
+		return instr.Disassemble(), rawData, err
 	case yatima.BDValues:
 		values, err := yabr.ReadValuesPair()
 		valStrings := make([]string, 2)
 
 		for i, val := range values {
-			valStrings[i] = fmt.Sprintf("%%v%d = %x (%d)", block.Offset+i, val, val)
+			valStrings[i] = fmt.Sprintf("%%v%d = %d", block.Offset+i, val)
 		}
 
+		rawData = fmt.Sprintf("%16x", values[0])
 		if len(values) > 1 {
-			data = fmt.Sprintf("; %-24s | %s", valStrings[0], valStrings[1])
+			data = fmt.Sprintf("; %-24s | %16x %s", valStrings[0], values[1], valStrings[1])
 		} else {
 			data = fmt.Sprintf("; %s", valStrings[0])
 		}
-		return data, err
+		return data, rawData, err
 	}
 
 	dir, err := yabr.ReadDirective()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
+	rawData = fmt.Sprintf("%2x'%4x %4x %4x %4x", dir.Type>>24, dir.Type&0xFFFFFF,
+		dir.P0, dir.P1, dir.Length)
 
 	switch dir.Type {
 	case yatima.BDProgram:
@@ -110,6 +114,9 @@ func decodeDirective(yabr *yatima.BinaryReader, block yatima.BDBlock) (data stri
 	case yatima.BDRegisterName:
 		data = fmt.Sprintf("; .REG %s _ %s", yatima.RegisterIndex(dir.P0).Name(),
 			yabr.ReadString(dir.P1))
+	case yatima.BDRegisterTransitiveHint:
+		data = fmt.Sprintf(".TRANS %s %s", yatima.RegisterIndex(dir.P0).Name(),
+			yatima.RegisterIndex(dir.P1).Name())
 	case yatima.BDEntryPoint:
 		// Entry points for the same address generated sequentally, improve
 		// readability by merging it
@@ -124,10 +131,19 @@ func decodeDirective(yabr *yatima.BinaryReader, block yatima.BDBlock) (data stri
 				err = yabr.UnreadDirective()
 				break
 			}
+
+			registers = append(registers, yatima.RegisterIndex(dir2.P0).Name())
 		}
 
 		data = fmt.Sprintf("; .ENTRY %s +%d", strings.Join(registers, " "),
 			dir.P1)
+	case yatima.BDModel:
+		data = ".MODEL"
+	case yatima.BDPinCluster, yatima.BDPinGroup:
+		data = fmt.Sprintf(".PINS %s", yabr.ReadString(dir.P0))
+	case yatima.BDPin:
+		data = fmt.Sprintf(".PIN _ %s %s", yatima.RegisterHintType(dir.P1).Name(),
+			yabr.ReadString(dir.P0))
 	default:
 		data = fmt.Sprint(dir)
 	}

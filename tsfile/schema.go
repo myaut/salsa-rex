@@ -20,6 +20,8 @@ const (
 	TSFFieldStartTime
 	TSFFieldEndTime
 
+	TSFFieldEnumerable
+
 	TSFInvalidField
 )
 
@@ -226,7 +228,7 @@ func (schema *TSFSchemaHeader) Check(allowExt bool) error {
 					DecodeCStr(field.FieldName[:]))
 			}
 			fallthrough
-		case TSFFieldInt:
+		case TSFFieldInt, TSFFieldEnumerable:
 			switch field.Size {
 			case 1, 2, 4, 8:
 				break
@@ -367,7 +369,7 @@ func NewDeserializer(schema *TSFSchemaHeader) *TSFDeserializer {
 			field.impl = func(buf []byte) interface{} {
 				return TSBoolean(binary.LittleEndian.Uint32(buf)).ToBoolean()
 			}
-		case TSFFieldInt:
+		case TSFFieldInt, TSFFieldEnumerable:
 			switch fieldHdr.Size {
 			case 1:
 				field.impl = func(buf []byte) interface{} { return int8(buf[0]) }

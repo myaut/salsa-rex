@@ -21,14 +21,18 @@ import (
 
 type SRVRex struct{}
 
-func (srv *SRVRex) initialize(path string, tsloadPath string, isMon bool) {
-	rexlib.Initialize(path)
+func (srv *SRVRex) initialize(path string, tsloadPath string, isMon bool) error {
+	err := rexlib.Initialize(path)
+	if err != nil {
+		return err
+	}
 
 	if !isMon {
 		tsload.SetTSLoadPath(tsloadPath)
 	}
 
 	gob.Register(&IncidentProviderArgs{})
+	return nil
 }
 
 func (srv *SRVRex) IsMonitorMode(arg *struct{}, reply *bool) error {
@@ -176,7 +180,7 @@ type incidentSelectCmd struct {
 	doCreate bool
 }
 
-type incidentCmdOpt struct {
+type incidentSelectOpt struct {
 	Copy      string `opt:"create=c|copy,opt"`
 	Overwrite bool   `opt:"create=o|overwrite,opt"`
 
@@ -184,12 +188,16 @@ type incidentCmdOpt struct {
 }
 
 func (cmd *incidentSelectCmd) NewOptions(ctx *fishly.Context) interface{} {
-	return new(incidentCmdOpt)
+	return new(incidentSelectOpt)
 }
 
 func (cmd *incidentSelectCmd) IsApplicable(cliCtx *fishly.Context) bool {
 	ctx := cliCtx.External.(*RexContext)
 	if ctx.isMonitor {
+		if ctx.TrainingMode {
+			return false
+		}
+
 		// Only select incidents is supported by monitors
 		return !cmd.doCreate
 	}
@@ -212,7 +220,7 @@ func (cmd *incidentSelectCmd) Execute(cliCtx *fishly.Context, rq *fishly.Request
 
 	// load other incident
 	ctx := cliCtx.External.(*RexContext)
-	opts := rq.Options.(*incidentCmdOpt)
+	opts := rq.Options.(*incidentSelectOpt)
 	if cmd.doCreate {
 		incidentName, copyName = opts.Incident, opts.Copy
 	} else {
@@ -284,6 +292,9 @@ func (cmd *incidentListCmd) NewOptions(cliCtx *fishly.Context) interface{} {
 
 func (cmd *incidentListCmd) IsApplicable(cliCtx *fishly.Context) bool {
 	ctx := cliCtx.External.(*RexContext)
+	if ctx.TrainingMode {
+		return false
+	}
 	return ctx.incident == nil && len(cliCtx.GetCurrentState().Variables) == 0
 }
 
@@ -466,6 +477,9 @@ func (cmd *incidentRemoveCmd) Complete(cliCtx *fishly.Context, rq *fishly.Comple
 
 func (cmd *incidentRemoveCmd) IsApplicable(cliCtx *fishly.Context) bool {
 	ctx := cliCtx.External.(*RexContext)
+	if ctx.TrainingMode {
+		return false
+	}
 	return ctx.incident == nil && len(cliCtx.GetCurrentState().Variables) == 0
 }
 

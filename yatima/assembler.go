@@ -9,11 +9,15 @@ import (
 	"strconv"
 )
 
+type ParameterType uint32
+
 const (
 	// Actor may use arithmetic operations for random values, but not for
 	// enumerables, as say sum of process ids makes no sense
 	RIORandom RegisterHintType = 1 << iota
 	RIOEnumerable
+	// Types that cannot be used in learning networks
+	RIOUnusable
 	// Variable registers used to share / save information between subprograms
 	RSVariable
 	// Parameter register is predefined with some value before spawning actor
@@ -31,6 +35,37 @@ var registerAliases map[string]RegisterIndex = map[string]RegisterIndex{
 	"s0": RS0, "s1": RS1, "s2": RS2, "s3": RS3,
 }
 
+const (
+	ifWrite = 1 << iota
+	ifJump
+	ifBinary
+)
+
+type instructionDescr struct {
+	instr  InstructionCode
+	format string
+	flags  uint32
+}
+
+var instructionDescriptors []instructionDescr = []instructionDescr{
+	instructionDescr{instr: NOP, flags: 0, format: "nop"},
+	instructionDescr{instr: CALL, flags: 0, format: "%c0:%c1 call on %o"},
+	instructionDescr{instr: RET, flags: 0, format: "ret"},
+	instructionDescr{instr: MOV, flags: ifWrite, format: "%o = %1"},
+	instructionDescr{instr: ADD, flags: ifWrite | ifBinary, format: "%o = %0 + %1"},
+	instructionDescr{instr: SUB, flags: ifWrite | ifBinary, format: "%o = %0 - %1"},
+	instructionDescr{instr: MUL, flags: ifWrite | ifBinary, format: "%o = %0 * %1"},
+	instructionDescr{instr: SUB, flags: ifWrite | ifBinary, format: "%o = %0 / %1"},
+	instructionDescr{instr: INC, flags: ifWrite, format: "%o ++"},
+	instructionDescr{instr: DEC, flags: ifWrite, format: "%o --"},
+	instructionDescr{instr: SHL, flags: ifWrite | ifBinary, format: "%o = %0 << %1"},
+	instructionDescr{instr: SHR, flags: ifWrite | ifBinary, format: "%o = %0 >> %1"},
+	instructionDescr{instr: ABS, flags: ifWrite, format: "%o = abs %1"},
+	instructionDescr{instr: JMP, flags: ifJump, format: "%jo go"},
+	instructionDescr{instr: JEQ, flags: ifJump, format: "%jo if %0 == %1"},
+	instructionDescr{instr: JNE, flags: ifJump, format: "%jo if %0 != %1"},
+}
+
 var registerHintNames map[string]RegisterHintType = map[string]RegisterHintType{
 	"random": RIORandom,
 	"enum":   RIOEnumerable,
@@ -38,18 +73,35 @@ var registerHintNames map[string]RegisterHintType = map[string]RegisterHintType{
 	"param":  RSParam,
 }
 
+// Instruction is represented as 4 words (uint32) and has opcode, two input
+// registers (RI0 is being optional) and output register where result is
+// written. Some instructions may encode special values in registers
+// and use output registers not directly for output, i.e.: call uses RO as
+// name of register for event trigger and RI0 and RI1 as absolute addresses
 type Instruction struct {
 	I        InstructionCode
 	RI0, RI1 RegisterIndex
 	RO       RegisterIndex
 }
 
+// Register hints help learn engine to synthesize reasonable network and
+// avoid "childish" mistakes of picking two incompatible inputs. It also used
+// for keeping variables names and scheduling them to proper registers.
 type RegisterHint struct {
 	Name     string
 	Register RegisterIndex
 	Hint     RegisterHintType
 }
 
+// Transitive hint determines pair of input registers which can be mutually
+// exchanged without changing the outcome. In such case only one combination
+// will be tried by the learner
+type RegisterTransitiveHint struct {
+	Register0, Register1 RegisterIndex
+}
+
+// Entry points contain relative addresses within programs (actors) pointing
+// to the first instruction which should be executed when input value is changed
 type EntryPoint struct {
 	Address  int
 	Register RegisterIndex
@@ -58,14 +110,29 @@ type EntryPoint struct {
 type Program struct {
 	Name         string
 	Hints        []RegisterHint
+	TransHints   []RegisterTransitiveHint
 	EntryPoints  []EntryPoint
 	Instructions []Instruction
 	Values       []int64
 }
 
+type CompilerErrorClass int
+
+const (
+	CETokensCount CompilerErrorClass = iota
+	CEWrongDirective
+	CEWrongRegister
+	CEUnknownInstruction
+	CEUnknownLabel
+	CEInvalidConstant
+
+	CEExternalError
+)
+
 type CompileError struct {
-	LineNo int
-	Text   string
+	LineNo     int
+	ErrorClass CompilerErrorClass
+	Text       string
 }
 
 type labelState struct {
@@ -101,14 +168,14 @@ func Compile(pReader io.Reader) ([]*Program, *CompileError) {
 	}
 
 	if state.prog != nil {
-		state.setError("Missing AEND directive in the actor")
+		state.setError(CEWrongDirective, "Missing AEND directive in the actor")
 	}
 	return state.programs, state.err
 }
 
 func (state *compilerState) createActor(name string) {
 	if state.prog != nil {
-		state.setError("Missing AEND directive in the actor")
+		state.setError(CEWrongDirective, "Missing AEND directive in the actor")
 		return
 	}
 
@@ -128,11 +195,12 @@ func (state *compilerState) getAddress() int {
 	return len(state.prog.Instructions)
 }
 
-func (state *compilerState) setError(text string) {
+func (state *compilerState) setError(ce CompilerErrorClass, fmtstr string, a ...interface{}) {
 	if state.err == nil {
 		state.err = &CompileError{
-			LineNo: state.lineNo,
-			Text:   text,
+			LineNo:     state.lineNo,
+			ErrorClass: ce,
+			Text:       fmt.Sprintf(fmtstr, a...),
 		}
 	}
 	state.done = true
@@ -150,8 +218,7 @@ func (state *compilerState) readLine() {
 	if ch == '.' {
 		switch bufs[0].String() {
 		case "ACTOR":
-			if len(bufs) < 2 {
-				state.setError("Actor requires a name")
+			if !state.requireExactBuffers(bufs, 2, "ACTOR") {
 				return
 			}
 			state.createActor(bufs[1].String())
@@ -167,13 +234,15 @@ func (state *compilerState) readLine() {
 		case "REG":
 			state.compileRegisterHint(bufs)
 			return
+		case "TRANS":
+			state.compileTransitiveRegisterHint(bufs)
+			return
 		default:
-			state.setError(fmt.Sprintf("Unknown directive '%s'", bufs[0].String()))
+			state.setError(CEWrongDirective, "Unknown directive .%s", bufs[0].String())
 		}
 	}
 
-	if state.prog == nil || len(state.prog.EntryPoints) == 0 {
-		state.setError("Expected declaration, got expression, add entry point first")
+	if !state.requireProgramBody() {
 		return
 	}
 
@@ -190,7 +259,6 @@ func (state *compilerState) readLine() {
 
 		instr := state.compileInstruction(bufs)
 		if instr.I == NOP {
-			state.setError("Unknown instruction")
 			return
 		}
 
@@ -200,7 +268,7 @@ func (state *compilerState) readLine() {
 		return
 	}
 
-	state.setError(fmt.Sprintf("%d tokens is too many", len(bufs)))
+	state.setError(CETokensCount, "Expression has too many (%d) tokens", len(bufs))
 	return
 }
 
@@ -229,15 +297,15 @@ func (state *compilerState) resolveLabels() {
 	// Resolve label addresses
 	for lName, label := range state.labels {
 		if label.address < 0 {
-			state.setError(fmt.Sprintf("Undefined label :%s", lName))
+			state.setError(CEUnknownLabel, "Undefined label :%s", lName)
 			break
 		}
 
 		for _, iAddress := range label.subbedInstrs {
 			instr := &state.prog.Instructions[iAddress]
 			if instr.RO != RIP {
-				state.setError(fmt.Sprintf("Cannot bind label to non-referring"+
-					" instruction <+%d> %s", iAddress, instr.Disassemble()))
+				state.setError(CEUnknownLabel, "Cannot bind label to non-referring instruction %s",
+					instr.Disassemble())
 				break
 			}
 
@@ -255,12 +323,8 @@ func (state *compilerState) resolveLabels() {
 }
 
 func (state *compilerState) compileEntryPoint(bufs []*bytes.Buffer) {
-	if len(bufs) < 2 {
-		state.setError("Entry point requires at least one register")
+	if !state.requireMinimumBuffers(bufs, 2, "ENTRY") || !state.requireProgram("ENTRY") {
 		return
-	}
-	if state.prog == nil {
-		state.setError("Entry points only valid inside the actor")
 	}
 
 	if len(state.prog.EntryPoints) > 0 {
@@ -272,22 +336,21 @@ func (state *compilerState) compileEntryPoint(bufs []*bytes.Buffer) {
 		// This is an entry point, generate it
 		reg := state.compileOperand(buf)
 		if reg != RT && !reg.isInputRegister() {
-			state.setError("Only %t and input registers can be used for entry points")
+			state.setError(CEWrongRegister, "Only %%t and input registers can be used for entry points")
 			return
 		}
 
 		state.prog.EntryPoints = append(state.prog.EntryPoints,
 			EntryPoint{Address: state.getAddress(), Register: reg})
+
+		// Even if we do not use directly reg's value (like %t) in the expressions,
+		// we want to listen for the updates, so generate daisy chained call
+		state.inRegs = append(state.inRegs, reg)
 	}
 }
 
 func (state *compilerState) compileRegisterHint(bufs []*bytes.Buffer) {
-	if len(bufs) < 3 {
-		state.setError("At least 3 tokens required by .REG")
-		return
-	}
-	if state.prog == nil || len(state.prog.EntryPoints) > 0 {
-		state.setError("Register directives should be defined in the beginning of actor")
+	if !state.requireMinimumBuffers(bufs, 3, "REG") || !state.requireDeclaration("REG") {
 		return
 	}
 
@@ -300,22 +363,29 @@ func (state *compilerState) compileRegisterHint(bufs []*bytes.Buffer) {
 	hintName := bufs[2].String()
 	hint.Hint, ok = registerHintNames[hintName]
 	if !ok {
-		state.setError(fmt.Sprintf("Unknown hint '%s'", hintName))
+		state.setError(CEWrongDirective, "Unknown register hint type '%s'", hintName)
 		return
 	}
 
 	switch hint.Hint {
 	case RSParam, RSVariable:
 		if !hint.Register.isStaticRegister() {
-			state.setError(fmt.Sprintf("Static register is expected for hint '%s', got %s",
-				hintName, hint.Register.Name()))
+			state.setError(CEWrongRegister, "Static register is expected for hint '%s', got %s",
+				hintName, hint.Register.Name())
+			return
+		}
+		fallthrough
+	case RLLocal:
+		if hint.Hint == RLLocal && !hint.Register.isLocalRegister() {
+			state.setError(CEWrongRegister, "Static register is expected for hint '%s', got %s",
+				hintName, hint.Register.Name())
 			return
 		}
 
-		if len(bufs) >= 3 {
+		if len(bufs) == 4 {
 			hint.Name = bufs[3].String()
 			if _, ok := state.variables[hint.Name]; ok {
-				state.setError(fmt.Sprintf("Variable '%s' is already defined", hint.Name))
+				state.setError(CEWrongDirective, "Variable '%s' is already defined", hint.Name)
 				return
 			}
 
@@ -323,13 +393,38 @@ func (state *compilerState) compileRegisterHint(bufs []*bytes.Buffer) {
 		}
 	default:
 		if !hint.Register.isIORegister() {
-			state.setError(fmt.Sprintf("I/O register is expected for hint '%s', got %s",
-				hintName, hint.Register.Name()))
+			state.setError(CEWrongRegister, "I/O register is expected for hint '%s', got %s",
+				hintName, hint.Register.Name())
 			return
 		}
 	}
 
 	state.prog.Hints = append(state.prog.Hints, hint)
+	return
+}
+
+func (state *compilerState) compileTransitiveRegisterHint(bufs []*bytes.Buffer) {
+	if !state.requireExactBuffers(bufs, 3, "TRANS") || !state.requireDeclaration("TRANS") {
+		return
+	}
+
+	var hint RegisterTransitiveHint
+	for i, buf := range bufs[1:] {
+		reg := state.compileOperand(buf)
+		if !reg.isInputRegister() {
+			state.setError(CEWrongRegister, "Input register is expected for .TRANS hint, got '%s'",
+				reg.Name())
+			return
+		}
+
+		if i == 0 {
+			hint.Register0 = reg
+		} else {
+			hint.Register1 = reg
+		}
+	}
+
+	state.prog.TransHints = append(state.prog.TransHints, hint)
 	return
 }
 
@@ -350,7 +445,7 @@ func (state *compilerState) compileOperand(buf *bytes.Buffer) RegisterIndex {
 		if ch2 == 'x' {
 			value, err := strconv.ParseInt(buf.String(), 16, 64)
 			if err != nil {
-				state.setError(err.Error())
+				state.setError(CEInvalidConstant, "%s", err.Error())
 				return RZ
 			}
 
@@ -364,13 +459,13 @@ func (state *compilerState) compileOperand(buf *bytes.Buffer) RegisterIndex {
 
 		value, err := strconv.ParseInt(buf.String(), 10, 64)
 		if err != nil {
-			state.setError(err.Error())
+			state.setError(CEInvalidConstant, "%s", err.Error())
 			return RZ
 		}
 
 		return state.compileIntegerValue(value)
 	case '"':
-		state.setError("String literals are not supported")
+		state.setError(CEInvalidConstant, "String constants are not supported")
 		return RZ
 	case '%':
 		regName := buf.String()
@@ -379,7 +474,7 @@ func (state *compilerState) compileOperand(buf *bytes.Buffer) RegisterIndex {
 			return index
 		}
 
-		state.setError(fmt.Sprintf("Unknown register %%%s", regName))
+		state.setError(CEWrongRegister, "Unknown register %%%s", regName)
 		return RZ
 	case ':':
 		// We can't use IP directly in instructions, so use it as a placeholder
@@ -402,7 +497,7 @@ func (state *compilerState) compileOperand(buf *bytes.Buffer) RegisterIndex {
 	// Unknown variable, allocate space for it if possible
 	reg := RL0 + RegisterIndex(len(state.variables))
 	if !reg.isLocalRegister() {
-		state.setError("Too many variables, not enough local registers")
+		state.setError(CEWrongRegister, "Too many variables, not enough local registers")
 		return RZ
 	}
 
@@ -439,6 +534,12 @@ func (state *compilerState) compileInstruction(bufs []*bytes.Buffer) (instr Inst
 	}
 
 	instr.I = state.compileInstructionCode(op1.String(), op2.String())
+	if instr.I == NOP {
+		state.setError(CEUnknownInstruction, "Unknown instruction %s, %s",
+			op1.String(), op2.String())
+		return
+	}
+
 	instr.RO = state.compileOperand(out)
 	if in0 != nil {
 		instr.RI0 = state.compileOperand(in0)
@@ -494,43 +595,101 @@ func (state *compilerState) compileInstructionCode(op1, op2 string) InstructionC
 }
 
 func (state *compilerState) validateInstruction(instr Instruction) {
-	var binaryOp, writeOp, jumpOp bool
+	descr := &instructionDescriptors[instr.I]
 
-	switch instr.I {
-	case ADD, SUB, MUL, DIV:
-		binaryOp = true
-		writeOp = true
-	case MOV, ABS, INC, DEC:
-		writeOp = true
-	case JMP:
-		jumpOp = true
-	case JEQ, JNE:
-		binaryOp = true
-		jumpOp = true
-	}
+	jumpOp := (descr.flags&ifJump != 0)
+	writeOp := (descr.flags&ifWrite != 0)
+	binaryOp := (descr.flags&ifBinary != 0)
 
 	if jumpOp && (instr.RO < RV && instr.RO != RIP) {
-		state.setError("Jump instructions require value or label operand")
+		state.setError(CEWrongRegister, "Jump instructions require value or label operand")
 	}
 	if writeOp && !instr.RO.isWriteableRegister() {
-		state.setError("Cannot write to non-writeable register")
+		state.setError(CEWrongRegister, "Cannot write to non-writeable register %s",
+			instr.RO.Name())
 	}
 	if instr.RO == RZ || instr.RI1 == RZ || (binaryOp && instr.RI0 == RZ) {
-		state.setError("Cannot use %z in instruction")
+		state.setError(CEWrongRegister, "Cannot use register %z in instruction")
 	}
 }
 
+func (state *compilerState) requireExactBuffers(bufs []*bytes.Buffer, required int,
+	directive string) bool {
+
+	if len(bufs) < required {
+		state.setError(CETokensCount, "Directive .%s requires exactly %d buffers, %d are given",
+			directive, required, len(bufs))
+		return false
+	}
+	return true
+}
+
+func (state *compilerState) requireMinimumBuffers(bufs []*bytes.Buffer, minimum int,
+	directive string) bool {
+
+	if len(bufs) < minimum {
+		state.setError(CETokensCount, "Directive .%s requires at least %d buffers, %d are given",
+			directive, minimum, len(bufs))
+		return false
+	}
+	return true
+}
+
+func (state *compilerState) requireProgram(directive string) bool {
+	if state.prog == nil {
+		state.setError(CEWrongDirective, "Directive .%s requires program to be defined first with .ACTOR")
+		return false
+	}
+	return true
+}
+
+func (state *compilerState) requireDeclaration(directive string) bool {
+	if len(state.prog.EntryPoints) > 0 {
+		state.setError(CEWrongDirective, "Directive .%s should be placed before entry points")
+		return false
+	}
+	return true
+}
+
+func (state *compilerState) requireProgramBody() bool {
+	if len(state.prog.EntryPoints) == 0 {
+		state.setError(CEWrongDirective, "Expression should be placed after entry point")
+		return false
+	}
+	return true
+}
+
 func (state *compilerState) addInOutRegs(instr Instruction) {
-	switch instr.I {
-	case MOV, ADD, SUB, MUL, DIV, ABS:
+	descr := &instructionDescriptors[instr.I]
+
+	if (descr.flags & ifWrite) != 0 {
 		state.inRegs = state.addInOutReg(instr.RI0, state.inRegs, true)
-		state.inRegs = state.addInOutReg(instr.RI1, state.inRegs, true)
 		state.outRegs = state.addInOutReg(instr.RO, state.outRegs, false)
+
+		if (descr.flags & ifBinary) != 0 {
+			state.inRegs = state.addInOutReg(instr.RI1, state.inRegs, true)
+		}
 	}
 }
 
 func (state *compilerState) addInOutReg(reg RegisterIndex, regs []RegisterIndex,
 	inReg bool) []RegisterIndex {
+
+	if reg.isIORegister() || reg.isStaticRegister() {
+		var hasHint bool
+		for _, hint := range state.prog.Hints {
+			if hint.Register == reg {
+				hasHint = true
+				break
+			}
+		}
+		if !hasHint {
+			state.setError(CEWrongRegister, "Non-local register %s should be supplemented with hint",
+				reg.Name())
+			return regs
+		}
+	}
+
 	if (inReg && reg >= RI0 && reg <= RI3) || (!inReg && reg >= RO0 && reg <= RO3) {
 		for _, reg2 := range regs {
 			if reg == reg2 {
@@ -581,7 +740,7 @@ func (state *compilerState) readInstrTokens() []*bytes.Buffer {
 			break
 		}
 		if err != nil {
-			state.setError(err.Error())
+			state.setError(CEExternalError, "%s", err.Error())
 			return nil
 		}
 		if ch == '\n' {
@@ -680,33 +839,14 @@ func (reg RegisterIndex) isWriteableRegister() bool {
 	return reg.isOutputRegister() || reg.isStaticRegister() || reg.isLocalRegister()
 }
 
-var codeFormat []string = []string{
-	"nop",
-	"%c0:%c1 call on %o",
-	"ret",
-	"%o = %1",
-	"%o = %0 + %1",
-	"%o = %0 - %1",
-	"%o = %0 * %1",
-	"%o = %0 / %1",
-	"%o ++",
-	"%o --",
-	"%o = %0 << %1",
-	"%o = %0 >> %1",
-	"%o = abs %1",
-	"%jo go",
-	"%jo if %0 == %1",
-	"%jo if %0 != %1",
-}
-
 func (instr Instruction) Disassemble() string {
-	if int(instr.I) >= len(codeFormat) {
+	if int(instr.I) >= len(instructionDescriptors) {
 		return fmt.Sprintf("(bad opcode %x)", instr.I)
 	}
 
 	var decodeFmt byte
 	var field bool
-	inBuf := bytes.NewBufferString(codeFormat[instr.I])
+	inBuf := bytes.NewBufferString(instructionDescriptors[instr.I].format)
 	outBuf := bytes.NewBuffer([]byte{})
 
 	for {

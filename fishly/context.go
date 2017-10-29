@@ -11,7 +11,6 @@ import (
 	"reflect"
 
 	"net/url"
-	"path/filepath"
 )
 
 //
@@ -115,7 +114,9 @@ func newContext(cfg *Config, extCtx ExternalContext) (ctx *Context, err error) {
 	}
 
 	// Some redirections
-	log.SetOutput(ctx.rl.Stderr())
+	if !cfg.KeepLogOutput {
+		log.SetOutput(ctx.rl.Stderr())
+	}
 
 	// Create first root state
 	ctx.states = make([]ContextState, 0, 1)
@@ -131,6 +132,9 @@ func newContext(cfg *Config, extCtx ExternalContext) (ctx *Context, err error) {
 			return nil, err
 		}
 	}
+
+	// Always re-initialize external context first (save) before tick
+	ctx.syncExternalVariables(false)
 	ctx.tick()
 
 	return ctx, nil
@@ -183,7 +187,7 @@ func (state *ContextState) URL() *url.URL {
 	ctxUrl := new(url.URL)
 
 	ctxUrl.Scheme = "ctx"
-	ctxUrl.Path = "/" + filepath.Join(state.Path...)
+	ctxUrl.Path = PathSeparator + strings.Join(state.Path, PathSeparator)
 
 	queryValues := make(url.Values)
 	for key, value := range state.Variables {
@@ -205,6 +209,9 @@ func (state *ContextState) Reset(newPath ...string) *ContextState {
 func (ctx *Context) PushStateFromURL(ctxUrl *url.URL, isRoot bool) error {
 	if ctxUrl.Scheme != "ctx" {
 		return fmt.Errorf("Invalid context state scheme: '%s'", ctxUrl.Scheme)
+	}
+	if len(ctxUrl.Host) > 0 {
+		return fmt.Errorf("Context state shouldn't have a host, got '%s'", ctxUrl.Host)
 	}
 
 	path := strings.Split(ctxUrl.Path, PathSeparator)
@@ -234,17 +241,45 @@ func (ctx *Context) syncExternalVariables(doLoad bool) {
 	}
 
 	extType := value.Type()
+	var pathPrepend []string
+fieldLoop:
 	for fieldIdx := 0; fieldIdx < extType.NumField(); fieldIdx++ {
 		// Check for ctxvar type tag defining context variable
 		field := extType.Field(fieldIdx)
+		fieldValue := value.Field(fieldIdx)
 		varName, hasTag := field.Tag.Lookup("ctxvar")
 		if !hasTag {
+			pathName, hasPath := field.Tag.Lookup("ctxpath")
+			if !hasPath {
+				continue
+			}
+
+			pathElements := strings.Split(pathName, PathSeparator)
+			if doLoad {
+				if fieldValue.Bool() && len(pathElements) > len(pathPrepend) {
+					pathPrepend = pathElements
+				}
+			} else {
+				// If current path starts with with whatever specified in
+				// ctxpath value, set corresponding boolean to true
+				if len(pathElements) > len(state.Path) {
+					fieldValue.SetBool(false)
+					continue fieldLoop
+				}
+
+				for i, el := range pathElements {
+					if el != state.Path[i] {
+						fieldValue.SetBool(false)
+						continue fieldLoop
+					}
+				}
+				fieldValue.SetBool(true)
+			}
 			continue
 		}
 
 		// Check for default value (or use type-zero value)
 		defaultStr := field.Tag.Get("default")
-		fieldValue := value.Field(fieldIdx)
 		mapValueInterface, hasMVI := state.Variables[varName]
 
 		if doLoad {
@@ -277,6 +312,10 @@ func (ctx *Context) syncExternalVariables(doLoad bool) {
 				fieldValue.Set(reflect.Zero(field.Type))
 			}
 		}
+	}
+
+	if len(pathPrepend) > 0 {
+		state.Path = append(pathPrepend, state.Path...)
 	}
 }
 
@@ -347,7 +386,7 @@ func (ctx *Context) reloadSchema() error {
 func (ctx *Context) loadSchema(fpath string) bool {
 	f, err := os.Open(fpath)
 	if err != nil {
-		log.Fatalln("Error loading schema file %s: %v", fpath, err)
+		log.Fatalf("Error loading schema file %s: %v", fpath, err)
 	}
 	defer f.Close()
 

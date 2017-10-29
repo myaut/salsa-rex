@@ -18,8 +18,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"encoding/json"
-
 	"tsfile"
 
 	"rexlib/provider"
@@ -82,7 +80,7 @@ type Incident struct {
 
 	// Incident's name and path to incident directory
 	Name string `json:"name"`
-	path string
+	subdirectory
 
 	// Host where incident was gathered: uses os.Hostname() on tracer, but uses
 	// netloc part of path on monitor (should match them somehow)
@@ -118,13 +116,12 @@ type IncidentDescriptor struct {
 	State       IncState
 }
 
-// Global incident directory which subdirs are incidents
-var incidentDir string = "."
-
 // Global cache of incidents
 type incidentsState struct {
 	// Protects following lists & maps
 	mtx sync.Mutex
+
+	path string
 
 	removed int
 	loaded  bool
@@ -134,15 +131,18 @@ type incidentsState struct {
 
 var Incidents incidentsState
 
-func Initialize(path string) {
-	incidentDir = path
+func Initialize(path string) (err error) {
+	Incidents.path = path
 	Incidents.cache = make(map[string]*Incident)
 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		os.Mkdir(path, incidentDirectoryPermissions)
+		err = os.Mkdir(path, incidentDirectoryPermissions)
+		if err != nil {
+			return err
+		}
 	}
 
-	Incidents.load()
+	return Incidents.load()
 }
 
 func (state *incidentsState) add(incident *Incident) {
@@ -163,7 +163,7 @@ func (state *incidentsState) load() error {
 	}
 
 	// Walk over data dir and load incidents
-	dirs, err := ioutil.ReadDir(incidentDir)
+	dirs, err := ioutil.ReadDir(Incidents.path)
 	if err != nil {
 		return err
 	}
@@ -172,7 +172,7 @@ func (state *incidentsState) load() error {
 		if fi.IsDir() {
 			incident := new(Incident)
 			incident.Name = fi.Name()
-			incident.path = filepath.Join(incidentDir, incident.Name)
+			incident.path = filepath.Join(Incidents.path, incident.Name)
 
 			// TODO we need description for GetList, but we need to defer
 			// incident loading somehow
@@ -266,8 +266,8 @@ func (state *incidentsState) Remove(names ...string) (err error) {
 	paths, err := state.remove(names)
 
 	for _, path := range paths {
-		if !strings.HasPrefix(path, incidentDir) {
-			err = fmt.Errorf("Incident has invalid path %s, this is unexpected", path)
+		if !strings.HasPrefix(path, state.path) {
+			err = fmt.Errorf("Incident has invalid path %s", path)
 			continue
 		}
 		os.RemoveAll(path)
@@ -279,32 +279,9 @@ func (state *incidentsState) New(other *Incident) (incident *Incident, err error
 	incident = new(Incident)
 
 	// Pick incident subdir (by the time) and create it
-	baseName := other.Name
-	if len(baseName) == 0 {
-		baseName = time.Now().Format(time.RFC3339)
-	}
-
-	for suffix := 0; suffix < 10; suffix++ {
-		name := baseName
-		if suffix > 0 {
-			name = fmt.Sprintf("%s.%d", baseName, suffix)
-		}
-		path := filepath.Join(incidentDir, name)
-
-		err := os.Mkdir(path, 0700)
-		if err == nil {
-			incident.Name = name
-			incident.path = path
-			break
-		}
-		if os.IsExist(err) {
-			continue
-		}
-
-		return nil, fmt.Errorf("Cannot create incident dir: %v", err)
-	}
-	if len(incident.path) == 0 {
-		return nil, fmt.Errorf("Cannot pick incident dir")
+	incident.Name, err = incident.create(Incidents.path, other.Name, '.')
+	if err != nil {
+		return nil, err
 	}
 
 	// default-initialize it or copy
@@ -321,6 +298,12 @@ func (state *incidentsState) New(other *Incident) (incident *Incident, err error
 	}
 	if err == nil {
 		state.add(incident)
+	}
+
+	if err == nil {
+		log.Printf("Created incident '%s'", incident.Name)
+	} else {
+		log.Printf("Error creating incident '%s': %v", incident.Name, err)
 	}
 	return
 }
@@ -345,39 +328,7 @@ func (incident *Incident) Merge(other *Incident) error {
 	return nil
 }
 
-// Loads incident from incident.json
-func (incident *Incident) loadJSONFile(obj interface{}, fileName string) error {
-	path := filepath.Join(incident.path, fileName)
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-
-	return json.NewDecoder(f).Decode(obj)
-}
-
 // Saves current incident configuration
-func (incident *Incident) saveJSONFile(obj interface{}, fileName string) (err error) {
-	tempFileName := fmt.Sprintln("%s.tmp", fileName)
-
-	tempPath := filepath.Join(incident.path, tempFileName)
-	f, err := os.Create(tempPath)
-	if err != nil {
-		return
-	}
-
-	encoder := json.NewEncoder(f)
-	encoder.SetIndent("  ", "  ")
-	err = encoder.Encode(obj)
-	if err == nil {
-		err = f.Close()
-	}
-	if err == nil {
-		err = os.Rename(tempPath, filepath.Join(incident.path, fileName))
-	}
-	return
-}
-
 func (incident *Incident) save() (err error) {
 	return incident.saveJSONFile(incident, "incident.json")
 }

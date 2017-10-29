@@ -48,6 +48,9 @@ type RexConfig struct {
 
 	// Monitor-related variables
 	monCfg RexMonConfig
+
+	// Yatima learning variables (only for monitoring)
+	yaCfg RexYatimaConfig
 }
 
 type RexMonConfig struct {
@@ -55,6 +58,10 @@ type RexMonConfig struct {
 	User   string
 	Socket string
 	Hosts  []string
+}
+
+type RexYatimaConfig struct {
+	Templates string
 }
 
 func main() {
@@ -117,6 +124,7 @@ func (rexCfg *RexConfig) load(isMon bool, path string) {
 
 	if isMon {
 		cfg.Section("mon").MapTo(&rexCfg.monCfg)
+		cfg.Section("yatima").MapTo(&rexCfg.yaCfg)
 	} else {
 		cfg.Section("cli").MapTo(&rexCfg.cliCfg)
 		cfg.Section("cli").MapTo(&rexCfg.cliRLCfg)
@@ -203,20 +211,37 @@ func (rexCfg *RexConfig) connectRexSocket() (conn *net.UnixConn) {
 	return
 }
 
-func (rexCfg *RexConfig) setupRPC(isMon bool) {
+func (rexCfg *RexConfig) setupRPC(isMon bool) (err error) {
 	srvHI := new(SRVHostInfo)
 	srvHI.initialize()
-	rpc.Register(srvHI)
 
 	srvRex := new(SRVRex)
-	srvRex.initialize(filepath.Join(rexCfg.DataDir, "incidents"), rexCfg.TSLoadPath, isMon)
+	err = srvRex.initialize(filepath.Join(rexCfg.DataDir, "incidents"), rexCfg.TSLoadPath, isMon)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	rpc.Register(srvHI)
 	rpc.Register(srvRex)
 
 	if isMon {
 		srvMon := new(SRVMon)
-		srvMon.initialize(rexCfg.monCfg, filepath.Join(rexCfg.DataDir, "sox"))
+		err = srvMon.initialize(rexCfg.monCfg, filepath.Join(rexCfg.DataDir, "sox"))
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		srvYa := new(SRVYa)
+		err = srvYa.initialize(rexCfg.yaCfg.Templates, filepath.Join(rexCfg.DataDir, "yatima"))
+		if err != nil {
+			log.Fatal(err)
+		}
+
 		rpc.Register(srvMon)
+		rpc.Register(srvYa)
 	}
+
+	return nil
 }
 
 func (rexCfg *RexConfig) waitForExitSignal() {

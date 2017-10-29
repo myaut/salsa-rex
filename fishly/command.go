@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"log"
+
+	"runtime/debug"
 )
 
 type Request struct {
@@ -237,6 +239,7 @@ func (ctx *Context) executeRequest(rq *Request) error {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("Command caused a panic: %v", r)
+			log.Print(string(debug.Stack()))
 		}
 	}()
 

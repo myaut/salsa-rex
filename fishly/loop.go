@@ -61,6 +61,9 @@ type Config struct {
 	Readline ReadlineDriverFactory
 	Cancel   CancelHandlerFactory
 
+	// Prevents fishly from redefining log outputs (good for tests)
+	KeepLogOutput bool
+
 	// Sets program message of the day
 	MOTD string
 

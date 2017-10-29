@@ -98,7 +98,7 @@ func (cmd *incidentImportCmd) NewOptions(ctx *fishly.Context) interface{} {
 
 func (cmd *incidentImportCmd) IsApplicable(cliCtx *fishly.Context) bool {
 	ctx := cliCtx.External.(*RexContext)
-	return ctx.isMonitor
+	return ctx.isMonitor && !ctx.TrainingMode
 }
 
 func (cmd *incidentImportCmd) Complete(cliCtx *fishly.Context, rq *fishly.CompleterRequest) {

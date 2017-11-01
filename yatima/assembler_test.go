@@ -13,6 +13,7 @@ var summatorText string = `
 		.REG %a random
 		.REG %b random
 		.REG %c random
+		.TRANS %a %b
 
 		.ENTRY %a %b
 			%c = %a + %b

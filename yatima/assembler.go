@@ -823,6 +823,9 @@ func (reg RegisterIndex) Name() string {
 func (reg RegisterIndex) isInputRegister() bool {
 	return reg >= RI0 && reg <= RI3
 }
+func (reg RegisterIndex) inputRegisterIndex() int {
+	return int(reg - RI0)
+}
 func (reg RegisterIndex) isOutputRegister() bool {
 	return reg >= RO0 && reg <= RO3
 }

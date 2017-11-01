@@ -40,7 +40,7 @@ type trainingHandle struct {
 	logFile *os.File
 	log     *log.Logger
 
-	baseModel *yatima.Model
+	baseModel *yatima.BaseModel
 }
 
 type TrainingSession struct {
@@ -247,7 +247,7 @@ func (handle *trainingHandle) run() {
 func (handle *trainingHandle) prepareBaseModel() error {
 	// Seed initial network (we want network to generate exactly one result
 	// so we use an aggregator here) and list of available inputs
-	handle.baseModel = yatima.NewModel(Training.templates)
+	handle.baseModel = yatima.NewBaseModel(Training.templates)
 
 	for _, incident := range handle.incidents {
 		trace, err := incident.GetTraceFile()
@@ -286,10 +286,26 @@ func (handle *trainingHandle) prepareBaseModel() error {
 			cluster.Groups = append(cluster.Groups, group)
 		}
 
-		handle.baseModel.Pins = append(handle.baseModel.Pins, cluster)
+		handle.baseModel.Inputs = append(handle.baseModel.Inputs, cluster)
 	}
 
 	// TODO seed selected subnetworks from other sessions
+
+	// Generate network framework. We want our latest two actors to be regr
+	// linear which will deduce correlations between two possibly dependent
+	// random variables and aggregator which will ensure that value is steady
+	regrLinId, err := handle.baseModel.AddActor("regr_lin", yatima.ActorTimeNone,
+		make([]yatima.PinIndex, 2))
+	if err != nil {
+		return err
+	}
+
+	// TODO replace with stddev?
+	_, err = handle.baseModel.AddActor("aggr_avg", yatima.ActorTimeEnd,
+		[]yatima.PinIndex{handle.baseModel.FindActorOutput(regrLinId, 0)})
+	if err != nil {
+		return err
+	}
 
 	// Dump base model to file
 	modelFile, err := os.Create(filepath.Join(handle.session.path, "model.yab"))
@@ -304,5 +320,5 @@ func (handle *trainingHandle) prepareBaseModel() error {
 	}
 	defer yabw.Close()
 
-	return yabw.AddModel(handle.baseModel)
+	return yabw.AddBaseModel(handle.baseModel)
 }

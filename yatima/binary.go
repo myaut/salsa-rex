@@ -25,6 +25,8 @@ const (
 	BDPinCluster
 	BDPinGroup
 	BDPin
+	BDActorInstance
+	BDActorInput
 )
 
 // this is "YAB0" in little endian
@@ -67,6 +69,47 @@ type BinaryReader struct {
 
 	lastDirective BinaryDirective
 	hasLD         bool
+}
+
+type BinaryDirectiveBuffer struct {
+	directives []BinaryDirective
+	blocks     []int
+}
+
+func (writer *BinaryWriter) newBuffer(capacity int) *BinaryDirectiveBuffer {
+	return &BinaryDirectiveBuffer{
+		directives: make([]BinaryDirective, 0, capacity),
+		blocks:     make([]int, 0, 8),
+	}
+}
+
+func (bdb *BinaryDirectiveBuffer) addDirectiveImpl(dirType BinaryDirectiveType, p0, p1 uint32, block bool) {
+	dir := BinaryDirective{
+		Type: dirType,
+		P0:   p0,
+		P1:   p1,
+	}
+	bdb.directives = append(bdb.directives, dir)
+
+	for _, blockIndex := range bdb.blocks {
+		bdb.directives[blockIndex].Length++
+	}
+	if block {
+		index := len(bdb.directives) - 1
+		bdb.blocks = append(bdb.blocks, index)
+	}
+}
+
+func (bdb *BinaryDirectiveBuffer) addBlock(dirType BinaryDirectiveType, p0, p1 uint32) {
+	bdb.addDirectiveImpl(dirType, p0, p1, true)
+}
+
+func (bdb *BinaryDirectiveBuffer) addDirective(dirType BinaryDirectiveType, p0, p1 uint32) {
+	bdb.addDirectiveImpl(dirType, p0, p1, false)
+}
+
+func (bdb *BinaryDirectiveBuffer) endBlock() {
+	bdb.blocks = bdb.blocks[:len(bdb.blocks)-1]
 }
 
 func NewWriter(writer io.WriteSeeker) (*BinaryWriter, error) {
@@ -127,42 +170,23 @@ func (yabw *BinaryWriter) addString(str string) (offset uint32) {
 }
 
 func (yabw *BinaryWriter) AddProgram(prog *Program) (err error) {
-	preamble := make([]BinaryDirective, 0, 8)
-	preamble = append(preamble, BinaryDirective{
-		Type: BDProgram,
-		P0:   yabw.addString(prog.Name),
-		P1:   yabw.progCount})
+	preamble := yabw.newBuffer(16)
+	preamble.addBlock(BDProgram, yabw.addString(prog.Name), yabw.progCount)
 
 	for _, hint := range prog.Hints {
-		preamble = append(preamble, BinaryDirective{
-			Type: BDRegisterHint,
-			P0:   uint32(hint.Register),
-			P1:   uint32(hint.Hint),
-		})
-
+		preamble.addDirective(BDRegisterHint, uint32(hint.Register), uint32(hint.Hint))
 		if len(hint.Name) > 0 {
-			preamble = append(preamble, BinaryDirective{
-				Type: BDRegisterName,
-				P0:   uint32(hint.Register),
-				P1:   yabw.addString(hint.Name),
-			})
+			preamble.addDirective(BDRegisterName, uint32(hint.Register),
+				yabw.addString(hint.Name))
 		}
 	}
 	for _, hint := range prog.TransHints {
-		preamble = append(preamble, BinaryDirective{
-			Type: BDRegisterTransitiveHint,
-			P0:   uint32(hint.Register0),
-			P1:   uint32(hint.Register1),
-		})
+		preamble.addDirective(BDRegisterTransitiveHint, uint32(hint.Register0),
+			uint32(hint.Register1))
 	}
 	for _, ep := range prog.EntryPoints {
-		preamble = append(preamble, BinaryDirective{
-			Type: BDEntryPoint,
-			P0:   uint32(ep.Register),
-			P1:   uint32(ep.Address),
-		})
+		preamble.addDirective(BDEntryPoint, uint32(ep.Register), uint32(ep.Address))
 	}
-	preamble = append(preamble)
 
 	// Compute total length of the program including values
 	valLength, valPad := len(prog.Values)/2, false
@@ -171,11 +195,14 @@ func (yabw *BinaryWriter) AddProgram(prog *Program) (err error) {
 		valPad = true
 	}
 
-	preamble[0].Length = uint32(len(preamble) + len(prog.Instructions) +
-		valLength)
+	// We do not directly write instructions/values through buffer, but need to
+	// account them. Then write buffer contents
+	preamble.directives[0].Length = uint32(len(prog.Instructions) + valLength + 2)
+	if valLength > 0 {
+		preamble.directives[0].Length++
+	}
 
-	// Write preamble (register hints & program tags)
-	err = yabw.write(preamble)
+	err = yabw.write(preamble.directives)
 	if err != nil {
 		return
 	}
@@ -217,39 +244,68 @@ func (yabw *BinaryWriter) AddProgram(prog *Program) (err error) {
 }
 
 func (yabw *BinaryWriter) AddModel(model *Model) (err error) {
-	dirs := make([]BinaryDirective, 1, 64)
-	dirs[0] = BinaryDirective{
-		Type: BDModel,
+	// To avoid dependency on the external library, put actor sources directly to a model
+	progIndeces, err := yabw.addModelPrograms(model)
+	if err != nil {
+		return err
 	}
 
-	for _, cluster := range model.Pins {
-		dirs = append(dirs, BinaryDirective{
-			Type: BDPinCluster,
-			P0:   yabw.addString(cluster.Name),
-		})
-		cdir := &dirs[len(dirs)-1]
+	mbuf := yabw.newBuffer(32)
+	mbuf.addBlock(BDModel, 0, 0)
 
+	for _, cluster := range model.base.Inputs {
+		mbuf.addBlock(BDPinCluster, yabw.addString(cluster.Name), 0)
 		for _, group := range cluster.Groups {
-			dirs = append(dirs, BinaryDirective{
-				Type: BDPinGroup,
-				P0:   yabw.addString(group.Name),
-			})
-			gdir := &dirs[len(dirs)-1]
-
+			mbuf.addBlock(BDPinGroup, yabw.addString(group.Name), 0)
 			for _, pin := range group.Pins {
-				dirs = append(dirs, BinaryDirective{
-					Type: BDPin,
-					P0:   yabw.addString(pin.Name),
-					P1:   uint32(pin.Hint),
-				})
-				gdir.Length++
+				mbuf.addDirective(BDPin, yabw.addString(pin.Name), uint32(pin.Hint))
 			}
-			cdir.Length += gdir.Length + 1
+			mbuf.endBlock()
 		}
-		dirs[0].Length += cdir.Length + 1
+		mbuf.endBlock()
 	}
 
-	return yabw.write(dirs)
+	for _, actor := range model.Actors {
+		mbuf.addBlock(BDActorInstance, progIndeces[actor.ProgramIndex], uint32(actor.TimeMode))
+		for _, pin := range actor.Inputs {
+			mbuf.addDirective(BDActorInput, pin.Encode(), 0)
+		}
+		for _, pin := range actor.Outputs {
+			mbuf.addDirective(BDPin, yabw.addString(pin.Name), uint32(pin.Hint))
+		}
+		mbuf.endBlock()
+	}
+
+	return yabw.write(mbuf.directives)
+}
+
+func (yabw *BinaryWriter) AddBaseModel(base *BaseModel) (err error) {
+	return yabw.AddModel(&Model{
+		base: base,
+
+		Actors: base.Actors,
+	})
+}
+
+func (yabw *BinaryWriter) addModelPrograms(model *Model) (indeces map[uint32]uint32, err error) {
+	indeces = make(map[uint32]uint32)
+
+	for _, actor := range model.Actors {
+		// This program was already used, ignore it
+		if _, ok := indeces[actor.ProgramIndex]; ok {
+			continue
+		}
+
+		// Insert program assembly to a output file and save index
+		indeces[actor.ProgramIndex] = yabw.progCount
+		err = yabw.AddProgram(model.base.library.Programs[actor.ProgramIndex])
+
+		if err != nil {
+			return
+		}
+	}
+
+	return
 }
 
 func NewReader(reader io.ReadSeeker, strReader io.ReadSeeker) (*BinaryReader, error) {

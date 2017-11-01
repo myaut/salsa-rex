@@ -2,5 +2,6 @@ aranGO
 proto
 *.test
 yatima/actors.yab
+yatima/yas/yas
 rex/rex
 

@@ -144,6 +144,12 @@ func decodeDirective(yabr *yatima.BinaryReader, block yatima.BDBlock) (data, raw
 	case yatima.BDPin:
 		data = fmt.Sprintf(".PIN _ %s %s", yatima.RegisterHintType(dir.P1).Name(),
 			yabr.ReadString(dir.P0))
+	case yatima.BDActorInstance:
+		data = fmt.Sprintf(".AINST %d %s", dir.P0, yatima.ActorTimeMode(dir.P1).Name())
+	case yatima.BDActorInput:
+		var pin yatima.PinIndex
+		pin.Decode(dir.P0)
+		data = fmt.Sprintf(".INPUT %d:%d:%d", pin.Cluster, pin.Group, pin.Pin)
 	default:
 		data = fmt.Sprint(dir)
 	}

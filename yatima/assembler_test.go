@@ -49,7 +49,7 @@ func validateSummator(t *testing.T, prog *yatima.Program) {
 		instr := prog.Instructions[0]
 		if instr.I != yatima.ADD || instr.RI0 != yatima.RI0 ||
 			instr.RI1 != yatima.RI1 || instr.RO != yatima.RO0 {
-			t.Errorf("Invalid first instruction %s", instr.Disassemble())
+			t.Errorf("Invalid first instruction %s", instr.Disassemble(false))
 		}
 	}
 }

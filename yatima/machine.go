@@ -24,7 +24,6 @@ package yatima
 // subscribers.
 
 type RegisterIndex uint32
-type RegisterHintType uint
 type InstructionCode uint32
 
 const (

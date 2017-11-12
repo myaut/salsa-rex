@@ -113,3 +113,8 @@ func (sd *subdirectory) loadJSONFile(obj interface{}, fileName string) error {
 
 	return json.NewDecoder(f).Decode(obj)
 }
+
+func (sd *subdirectory) makeDirs(relPath string) (path string, err error) {
+	path = filepath.Join(sd.path, relPath)
+	return path, os.MkdirAll(path, 0770)
+}

@@ -10,6 +10,7 @@ import (
 )
 
 type ParameterType uint32
+type RegisterHintType uint
 
 const (
 	// Actor may use arithmetic operations for random values, but not for
@@ -103,7 +104,7 @@ type RegisterTransitiveHint struct {
 // Entry points contain relative addresses within programs (actors) pointing
 // to the first instruction which should be executed when input value is changed
 type EntryPoint struct {
-	Address  int
+	Address  uint32
 	Register RegisterIndex
 }
 
@@ -305,7 +306,7 @@ func (state *compilerState) resolveLabels() {
 			instr := &state.prog.Instructions[iAddress]
 			if instr.RO != RIP {
 				state.setError(CEUnknownLabel, "Cannot bind label to non-referring instruction %s",
-					instr.Disassemble())
+					instr.Disassemble(false))
 				break
 			}
 
@@ -341,7 +342,7 @@ func (state *compilerState) compileEntryPoint(bufs []*bytes.Buffer) {
 		}
 
 		state.prog.EntryPoints = append(state.prog.EntryPoints,
-			EntryPoint{Address: state.getAddress(), Register: reg})
+			EntryPoint{Address: uint32(state.getAddress()), Register: reg})
 
 		// Even if we do not use directly reg's value (like %t) in the expressions,
 		// we want to listen for the updates, so generate daisy chained call
@@ -793,7 +794,7 @@ func (hint RegisterHintType) Name() string {
 	return "_"
 }
 
-func (reg RegisterIndex) Name() string {
+func (reg RegisterIndex) name(isLinked bool) string {
 	switch reg {
 	case RZ:
 		return "_"
@@ -805,19 +806,28 @@ func (reg RegisterIndex) Name() string {
 		return "@"
 	}
 
-	if reg.isInputRegister() {
-		return fmt.Sprint("%i", reg-RI0)
-	} else if reg.isOutputRegister() {
-		return fmt.Sprint("%o", reg-RO0)
-	} else if reg.isLocalRegister() {
+	if reg.isLocalRegister() {
 		return fmt.Sprint("%l", reg-RL0)
+	}
+	if isLinked {
+		return fmt.Sprintf("[%x]", reg)
+	}
+
+	if reg.isInputRegister() {
+		return fmt.Sprint("%i", reg.inputRegisterIndex())
+	} else if reg.isOutputRegister() {
+		return fmt.Sprint("%o", reg.outputRegisterIndex())
 	} else if reg.isStaticRegister() {
-		return fmt.Sprint("%s", reg-RS0)
+		return fmt.Sprint("%s", reg.staticRegisterIndex())
 	} else if reg >= RV {
 		return fmt.Sprint("%v", reg-RV)
 	}
 
 	return "???"
+}
+
+func (reg RegisterIndex) Name() string {
+	return reg.name(false)
 }
 
 func (reg RegisterIndex) isInputRegister() bool {
@@ -829,11 +839,17 @@ func (reg RegisterIndex) inputRegisterIndex() int {
 func (reg RegisterIndex) isOutputRegister() bool {
 	return reg >= RO0 && reg <= RO3
 }
+func (reg RegisterIndex) outputRegisterIndex() int {
+	return int(reg - RO0)
+}
 func (reg RegisterIndex) isIORegister() bool {
 	return reg >= RI0 && reg <= RO3
 }
 func (reg RegisterIndex) isStaticRegister() bool {
 	return reg >= RS0 && reg <= RS3
+}
+func (reg RegisterIndex) staticRegisterIndex() int {
+	return int(reg - RS0)
 }
 func (reg RegisterIndex) isLocalRegister() bool {
 	return reg >= RL0 && reg <= RL7
@@ -842,7 +858,7 @@ func (reg RegisterIndex) isWriteableRegister() bool {
 	return reg.isOutputRegister() || reg.isStaticRegister() || reg.isLocalRegister()
 }
 
-func (instr Instruction) Disassemble() string {
+func (instr Instruction) Disassemble(isLinked bool) string {
 	if int(instr.I) >= len(instructionDescriptors) {
 		return fmt.Sprintf("(bad opcode %x)", instr.I)
 	}
@@ -879,17 +895,21 @@ func (instr Instruction) Disassemble() string {
 			if !field {
 				switch decodeFmt {
 				case '\000':
-					outBuf.WriteString(reg.Name())
+					if isLinked && instr.I == CALL && (reg == RT || reg == RT+1) {
+						outBuf.WriteString(fmt.Sprint("%t", instr.RO-RT))
+					} else {
+						outBuf.WriteString(reg.name(isLinked))
+					}
 				case 'j':
 					if instr.RO < RV {
 						offset := int(reg) - int(nearJumpRegister)
 						fmt.Fprintf(outBuf, "%+x", offset)
 					} else {
-						outBuf.WriteString(reg.Name())
+						outBuf.WriteString(reg.name(isLinked))
 					}
 				case 'c':
 					if reg != RZ {
-						fmt.Fprintf(outBuf, "%+x", reg)
+						fmt.Fprintf(outBuf, "%x", reg)
 					}
 				case 'x':
 					fmt.Fprintf(outBuf, "%+x", reg)

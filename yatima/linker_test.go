@@ -112,8 +112,37 @@ func linkModel(tmpDir string, model *yatima.Model) error {
 	return nil
 }
 
+func linkLinkedProgram(tmpDir string, model *yatima.Model, prog *yatima.LinkedProgram) error {
+	path := filepath.Join(tmpDir, model.Signature()+".yab")
+	err := os.MkdirAll(filepath.Dir(path), 0777)
+	if err != nil {
+		return err
+	}
+
+	libFile, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer libFile.Close()
+
+	yabWriter, err := yatima.NewWriter(libFile)
+	if err != nil {
+		return err
+	}
+
+	err = yabWriter.AddModel(model)
+	if err == nil {
+		yabWriter.AddLinkedProgram(prog)
+	}
+	yabWriter.Close()
+
+	return err
+}
+
 func TestLinkerModel(t *testing.T) {
 	testLinkerWithLibrary(t, func(tmpDir string, library *yatima.Library) error {
+		fmt.Println(tmpDir)
+
 		base := yatima.NewBaseModel(library)
 		base.Inputs = []yatima.PinCluster{
 			yatima.PinCluster{
@@ -141,10 +170,21 @@ func TestLinkerModel(t *testing.T) {
 		mutator := base.NewMutator()
 		var i int
 		for model := mutator.Next(); model != nil; model = mutator.Next() {
-			fmt.Println(model.Signature(), model.Error)
+			if model.Error == nil {
+				fmt.Println(model.Signature())
+				prog, err := model.Link()
+
+				if err == nil {
+					err = linkLinkedProgram("/tmp", model, prog)
+				}
+				if err != nil {
+					t.Error(err)
+				}
+			}
 
 			i++
 			if i > 1024 {
+				t.Error("Too many variants")
 				break
 			}
 		}

@@ -27,6 +27,10 @@ const (
 	BDPin
 	BDActorInstance
 	BDActorInput
+
+	BDLProgram
+	BDLRegisters
+	BDLEntryPoint
 )
 
 // this is "YAB0" in little endian
@@ -188,6 +192,10 @@ func (yabw *BinaryWriter) AddProgram(prog *Program) (err error) {
 		preamble.addDirective(BDEntryPoint, uint32(ep.Register), uint32(ep.Address))
 	}
 
+	return yabw.addProgram(prog, preamble)
+}
+
+func (yabw *BinaryWriter) addProgram(prog *Program, preamble *BinaryDirectiveBuffer) (err error) {
 	// Compute total length of the program including values
 	valLength, valPad := len(prog.Values)/2, false
 	if len(prog.Values)%2 != 0 {
@@ -197,7 +205,7 @@ func (yabw *BinaryWriter) AddProgram(prog *Program) (err error) {
 
 	// We do not directly write instructions/values through buffer, but need to
 	// account them. Then write buffer contents
-	preamble.directives[0].Length = uint32(len(prog.Instructions) + valLength + 2)
+	preamble.directives[0].Length += uint32(len(prog.Instructions) + valLength + 2)
 	if valLength > 0 {
 		preamble.directives[0].Length++
 	}
@@ -308,6 +316,26 @@ func (yabw *BinaryWriter) addModelPrograms(model *Model) (indeces map[uint32]uin
 	return
 }
 
+func (yabw *BinaryWriter) AddLinkedProgram(prog *LinkedProgram) (err error) {
+	lpbuf := yabw.newBuffer(32)
+	lpbuf.addBlock(BDLProgram, 0, 0)
+
+	lpbuf.addBlock(BDLRegisters, 0, 0)
+	for _, reg := range prog.Registers {
+		lpbuf.addDirective(BDActorInput, reg.Encode(), 0)
+	}
+	lpbuf.endBlock()
+
+	for _, ep := range prog.EntryPoints {
+		lpbuf.addDirective(BDLEntryPoint, ep, 0)
+	}
+
+	return yabw.addProgram(&Program{
+		Instructions: prog.Instructions,
+		Values:       prog.Values,
+	}, lpbuf)
+}
+
 func NewReader(reader io.ReadSeeker, strReader io.ReadSeeker) (*BinaryReader, error) {
 	yabr := &BinaryReader{
 		reader:    reader,
@@ -365,6 +393,17 @@ func (yabr *BinaryReader) getBlock() (block BDBlock) {
 	}
 
 	return
+}
+
+// Returns true if current block stack contains directive of specified type
+func (yabr *BinaryReader) InBlock(dirType BinaryDirectiveType) bool {
+	for _, block := range yabr.stack {
+		if block.Type == dirType {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (yabr *BinaryReader) GetState() (block BDBlock, off int, depth int) {
@@ -505,7 +544,7 @@ func (yabr *BinaryReader) ReadProgram() (*Program, error) {
 		return nil, fmt.Errorf("ReadProgram() should be called after program directive")
 	}
 
-	for block.Length > 0 {
+	for block.Length > 1 {
 		dir, err := yabr.ReadDirective()
 		if err != nil {
 			return nil, err
@@ -532,7 +571,7 @@ func (yabr *BinaryReader) ReadProgram() (*Program, error) {
 		case BDEntryPoint:
 			prog.EntryPoints = append(prog.EntryPoints, EntryPoint{
 				Register: RegisterIndex(dir.P0),
-				Address:  int(dir.P1),
+				Address:  dir.P1,
 			})
 		case BDProgramBody:
 			prog.Instructions = make([]Instruction, dir.Length)

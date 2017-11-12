@@ -63,7 +63,7 @@ type PinIndex struct {
 }
 
 func (pin PinIndex) Encode() uint32 {
-	if pin.Group > 0xFFFFFF || pin.Cluster > 0xFFFFFF {
+	if pin.Group > 0xFFF || pin.Cluster > 0xFFF || pin.Pin > 0xFF {
 		panic("Pin index exceeds limits")
 	}
 
@@ -71,8 +71,8 @@ func (pin PinIndex) Encode() uint32 {
 }
 
 func (pin *PinIndex) Decode(value uint32) {
-	pin.Cluster = (value >> 20) & 0xFFFFFF
-	pin.Group = (value >> 8) & 0xFFFFFF
+	pin.Cluster = (value >> 20) & 0xFFF
+	pin.Group = (value >> 8) & 0xFFF
 	pin.Pin = value & 0xFF
 }
 
@@ -225,15 +225,19 @@ func (library *Library) FindProgram(name string) (uint32, *Program) {
 // Finds actor output at pinIndex for the actor identified by index
 // (index returned by AddActor())
 func (model *Model) FindActorOutput(actorIndex, pinIndex uint32) (pin PinIndex) {
-	pin = PinIndex{
-		Group: uint32(1 + actorIndex),
-		Pin:   uint32(pinIndex),
-	}
+	pin = model.getActorOutput(actorIndex, pinIndex)
 
 	if model.getPin(pin) == nil {
 		return PinIndex{}
 	}
 	return
+}
+
+func (model *Model) getActorOutput(actorIndex, pinIndex uint32) (pin PinIndex) {
+	return PinIndex{
+		Group: uint32(1 + actorIndex),
+		Pin:   uint32(pinIndex),
+	}
 }
 
 func (base *BaseModel) FindActorOutput(actorIndex, pinIndex uint32) (pin PinIndex) {
@@ -385,7 +389,7 @@ func (base *BaseModel) AddActor(name string, timeMode ActorTimeMode, inputs []Pi
 		return 0, fmt.Errorf("Time signal is requested, but actor has no entry point")
 	}
 	for _, input := range inputs {
-		fakeModel := Model{base: base}
+		fakeModel := Model{base: base, Actors: base.Actors}
 		if !input.IsZero() && fakeModel.getPin(input) == nil {
 			return 0, fmt.Errorf("Invalid input %v", input)
 		}
@@ -416,7 +420,7 @@ func (base *BaseModel) generateProgramOutputs(prog *Program) (outputs []Pin) {
 
 // Generate input indeces all bound to zero pin
 func (base *BaseModel) generateProgramInputs(prog *Program) []PinIndex {
-	rightInputIndex := -1
+	lastInputIndex := -1
 	for _, hint := range prog.Hints {
 		if hint.Register.isInputRegister() {
 			// If actor subprogram uses, say %i1 and %i2 registers (omits %i0),
@@ -424,13 +428,38 @@ func (base *BaseModel) generateProgramInputs(prog *Program) []PinIndex {
 			// indeces in array. And yes, that will produce more mutations than
 			// needed
 			inputIndex := hint.Register.inputRegisterIndex()
-			if inputIndex > rightInputIndex {
-				rightInputIndex = inputIndex
+			if inputIndex > lastInputIndex {
+				lastInputIndex = inputIndex
 			}
 		}
 	}
 
-	return make([]PinIndex, rightInputIndex+1)
+	return make([]PinIndex, lastInputIndex+1)
+}
+
+func (base *BaseModel) generateProgramStatics(prog *Program, actorIndex, baseIndex uint32) []PinIndex {
+	lastStaticIndex := -1
+	for _, hint := range prog.Hints {
+		if hint.Register.isStaticRegister() {
+			// Similar to generateProgramInputs()
+			staticIndex := hint.Register.staticRegisterIndex()
+			if staticIndex > lastStaticIndex {
+				lastStaticIndex = staticIndex
+			}
+		}
+	}
+	if lastStaticIndex == -1 {
+		return nil
+	}
+
+	indeces := make([]PinIndex, 0, lastStaticIndex+1)
+	for index := 0; index <= lastStaticIndex; index++ {
+		indeces = append(indeces, PinIndex{
+			Group: actorIndex + 1,
+			Pin:   baseIndex + uint32(index),
+		})
+	}
+	return indeces
 }
 
 // Returns true if one of the program's entry points expects time event to
@@ -486,7 +515,7 @@ func (model *Model) Signature() string {
 
 	for index, actor := range model.Actors {
 		if index > 0 {
-			buf.WriteByte('-')
+			buf.WriteByte('/')
 		}
 
 		buf.WriteByte(encode(actor.ProgramIndex, 0))
@@ -512,7 +541,19 @@ func (model *Model) Signature() string {
 func (base *BaseModel) Clone() (model *Model) {
 	model = &Model{base: base}
 
-	for _, baseActor := range base.Actors {
+	model.addActors(base.Actors)
+	return model
+}
+
+func (source *Model) Clone() (model *Model) {
+	model = &Model{base: source.base}
+
+	model.addActors(source.Actors)
+	return model
+}
+
+func (model *Model) addActors(actors []ActorInstance) {
+	for _, baseActor := range actors {
 		// Clone actor except its mutable part (inputs) which might be
 		// rebound to other pins
 		model.Actors = append(model.Actors, baseActor)
@@ -527,8 +568,6 @@ func (base *BaseModel) Clone() (model *Model) {
 			}
 		}
 	}
-
-	return model
 }
 
 // Creates new mutator object which iteratively
@@ -691,7 +730,6 @@ func (model *Model) hasActorLoop(visited map[int]int, index int, indeces []int) 
 		childIndex := int(input.Group - 1)
 		for _, parentIndex := range indeces {
 			if parentIndex == childIndex {
-				fmt.Println(indeces)
 				return true
 			}
 		}

@@ -47,7 +47,7 @@ func dumpFile(inFile string) (err error) {
 			address = fmt.Sprintf("+%x", block.Offset)
 		}
 
-		fmt.Printf("%6x %3s | %24s | ", off, address, rawData)
+		fmt.Printf("%6x %3s | %28s | ", off, address, rawData)
 		fmt.Println(indent, data)
 	}
 
@@ -57,10 +57,11 @@ func dumpFile(inFile string) (err error) {
 func decodeDirective(yabr *yatima.BinaryReader, block yatima.BDBlock) (data, rawData string, err error) {
 	switch block.Type {
 	case yatima.BDProgramBody:
+		isLinked := yabr.InBlock(yatima.BDLProgram)
 		instr, err := yabr.ReadInstruction()
 
-		rawData = fmt.Sprintf("%4x %4x %4x %4x", instr.I, instr.RI0, instr.RI1, instr.RO)
-		return instr.Disassemble(), rawData, err
+		rawData = fmt.Sprintf("%4x %6x %6x %6x", instr.I, instr.RI0, instr.RI1, instr.RO)
+		return instr.Disassemble(isLinked), rawData, err
 	case yatima.BDValues:
 		values, err := yabr.ReadValuesPair()
 		valStrings := make([]string, 2)
@@ -82,7 +83,7 @@ func decodeDirective(yabr *yatima.BinaryReader, block yatima.BDBlock) (data, raw
 	if err != nil {
 		return "", "", err
 	}
-	rawData = fmt.Sprintf("%2x'%4x %4x %4x %4x", dir.Type>>24, dir.Type&0xFFFFFF,
+	rawData = fmt.Sprintf("%2x'%4x %6x %6x %6x", dir.Type>>24, dir.Type&0xFFFFFF,
 		dir.P0, dir.P1, dir.Length)
 
 	switch dir.Type {
@@ -150,6 +151,12 @@ func decodeDirective(yabr *yatima.BinaryReader, block yatima.BDBlock) (data, raw
 		var pin yatima.PinIndex
 		pin.Decode(dir.P0)
 		data = fmt.Sprintf(".INPUT %d:%d:%d", pin.Cluster, pin.Group, pin.Pin)
+	case yatima.BDLProgram:
+		data = ".PROGRAM (linked)"
+	case yatima.BDLRegisters:
+		data = ".REGS"
+	case yatima.BDLEntryPoint:
+		data = fmt.Sprintf(".ENTRY ... +%x", dir.P0)
 	default:
 		data = fmt.Sprint(dir)
 	}

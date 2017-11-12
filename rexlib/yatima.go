@@ -4,6 +4,8 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+
+	"runtime"
 	"sync"
 
 	"fmt"
@@ -43,6 +45,11 @@ type trainingHandle struct {
 	baseModel *yatima.BaseModel
 }
 
+type trainingModelHandle struct {
+	handle *trainingHandle
+	model  *yatima.Model
+}
+
 type TrainingSession struct {
 	Name string `json:"name"`
 	subdirectory
@@ -53,6 +60,8 @@ type TrainingSession struct {
 
 	Started bool                    `json:"started"`
 	Results []TrainingNetworkResult `json:"results"`
+
+	Trace bool `json:"trace"`
 }
 
 type trainingState struct {
@@ -62,6 +71,8 @@ type trainingState struct {
 	path     string
 
 	templates *yatima.Library
+
+	modelChan chan trainingModelHandle
 }
 
 var Training trainingState
@@ -80,6 +91,12 @@ func InitializeYatima(templatesPath, trainingPath string) error {
 		}
 	}
 	Training.path = trainingPath
+
+	// spawn training goroutines and create their channel
+	Training.modelChan = make(chan trainingModelHandle)
+	for i := 0; i < runtime.NumCPU()-1; i++ {
+		go Training.trainLoop()
+	}
 
 	return Training.load()
 }
@@ -242,6 +259,18 @@ func (handle *trainingHandle) run() {
 		handle.log.Printf("Cannot prepare base model: %v", err)
 		return
 	}
+
+	mutator := handle.baseModel.NewMutator()
+	for model := mutator.Next(); model != nil; model = mutator.Next() {
+		if model.Error != nil {
+			if handle.session.Trace {
+				handle.log.Printf("%s is rejected: %v", model.Signature(), model.Error)
+			}
+			continue
+		}
+
+		Training.modelChan <- trainingModelHandle{handle: handle, model: model}
+	}
 }
 
 func (handle *trainingHandle) prepareBaseModel() error {
@@ -321,4 +350,52 @@ func (handle *trainingHandle) prepareBaseModel() error {
 	defer yabw.Close()
 
 	return yabw.AddBaseModel(handle.baseModel)
+}
+
+func (state *trainingState) trainLoop() {
+	for {
+		handle := <-state.modelChan
+		modelSig := handle.model.Signature()
+
+		prog, err := handle.model.Link()
+		if err != nil {
+			handle.handle.log.Printf("Cannot link %s: %v", modelSig, err)
+			continue
+		}
+
+		path, err := handle.handle.session.makeDirs(modelSig)
+		if err != nil {
+			handle.handle.log.Printf("Cannot create dir for %s: %v", modelSig, err)
+			continue
+		}
+
+		err = state.dumpLinkedProgram(path, handle.model, prog)
+		if err != nil {
+			handle.handle.log.Printf("Cannot dump %s: %v", modelSig, err)
+			continue
+		}
+	}
+}
+
+func (state *trainingState) dumpLinkedProgram(path string, model *yatima.Model,
+	prog *yatima.LinkedProgram) (err error) {
+
+	yabFile, err := os.Create(filepath.Join(path, "program.yab"))
+	if err != nil {
+		return
+	}
+	defer yabFile.Close()
+
+	yabWriter, err := yatima.NewWriter(yabFile)
+	if err != nil {
+		return
+	}
+
+	err = yabWriter.AddModel(model)
+	if err == nil {
+		yabWriter.AddLinkedProgram(prog)
+	}
+	yabWriter.Close()
+
+	return
 }

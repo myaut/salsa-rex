@@ -26,6 +26,7 @@ func (srv *SRVRex) GetEvents(args *rexlib.IncidentEventArgs, reply *rexlib.Incid
 	if err != nil {
 		return
 	}
+	defer trace.Put()
 
 	reply.Schema, err = trace.GetSchema(args.Tag)
 	if err != nil {

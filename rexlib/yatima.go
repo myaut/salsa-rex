@@ -14,8 +14,6 @@ import (
 	"strings"
 
 	"yatima"
-
-	"tsfile"
 )
 
 //
@@ -28,26 +26,10 @@ import (
 //
 
 type TrainingNetworkResult struct {
-	Variant  int   `json:"variant"`
-	Incident int   `json:"incident"`
-	Result   int64 `json:"result"`
-}
-
-type trainingHandle struct {
-	session *TrainingSession
-
-	incidents []*Incident
-	parents   []*TrainingSession
-
-	logFile *os.File
-	log     *log.Logger
-
-	baseModel *yatima.BaseModel
-}
-
-type trainingModelHandle struct {
-	handle *trainingHandle
-	model  *yatima.Model
+	Signature  string `json:"signature"`
+	Ratio      int64  `json:"ratio"`
+	ModelError int64  `json:"error"`
+	Error      string `json:"err,omitempty"`
 }
 
 type TrainingSession struct {
@@ -72,7 +54,7 @@ type trainingState struct {
 
 	templates *yatima.Library
 
-	modelChan chan trainingModelHandle
+	modelChan chan *trainingModelHandle
 }
 
 var Training trainingState
@@ -93,7 +75,7 @@ func InitializeYatima(templatesPath, trainingPath string) error {
 	Training.path = trainingPath
 
 	// spawn training goroutines and create their channel
-	Training.modelChan = make(chan trainingModelHandle)
+	Training.modelChan = make(chan *trainingModelHandle, runtime.NumCPU()*4)
 	for i := 0; i < runtime.NumCPU()-1; i++ {
 		go Training.trainLoop()
 	}
@@ -193,6 +175,8 @@ func (state *trainingState) Run(session *TrainingSession) (err error) {
 		incidents: make([]*Incident, 0),
 		parents:   make([]*TrainingSession, 0),
 		session:   session,
+
+		resultsChan: make(chan TrainingNetworkResult, 32),
 	}
 
 	for _, name := range session.Sessions {
@@ -249,153 +233,4 @@ func (state *trainingState) start(session *TrainingSession) error {
 
 func (session *TrainingSession) save() error {
 	return session.saveJSONFile(session, "session.json")
-}
-
-func (handle *trainingHandle) run() {
-	defer handle.logFile.Close()
-
-	err := handle.prepareBaseModel()
-	if err != nil {
-		handle.log.Printf("Cannot prepare base model: %v", err)
-		return
-	}
-
-	mutator := handle.baseModel.NewMutator()
-	for model := mutator.Next(); model != nil; model = mutator.Next() {
-		if model.Error != nil {
-			if handle.session.Trace {
-				handle.log.Printf("%s is rejected: %v", model.Signature(), model.Error)
-			}
-			continue
-		}
-
-		Training.modelChan <- trainingModelHandle{handle: handle, model: model}
-	}
-}
-
-func (handle *trainingHandle) prepareBaseModel() error {
-	// Seed initial network (we want network to generate exactly one result
-	// so we use an aggregator here) and list of available inputs
-	handle.baseModel = yatima.NewBaseModel(Training.templates)
-
-	for _, incident := range handle.incidents {
-		trace, err := incident.GetTraceFile()
-		if err != nil {
-			return err
-		}
-
-		cluster := yatima.PinCluster{Name: incident.Name}
-		stats := trace.GetStats()
-		for _, seriesStats := range stats.Series {
-			group := yatima.PinGroup{Name: seriesStats.Name}
-
-			schema, err := trace.GetSchema(seriesStats.Tag)
-			if err != nil {
-				return err
-			}
-
-			info := schema.Info()
-			for _, field := range info.Fields {
-				hint := yatima.RIOUnusable
-				switch field.FieldType {
-				case tsfile.TSFFieldInt, tsfile.TSFFieldStartTime, tsfile.TSFFieldEndTime:
-					hint = yatima.RIORandom
-				case tsfile.TSFFieldEnumerable:
-					hint = yatima.RIOEnumerable
-				}
-
-				group.Pins = append(group.Pins, yatima.Pin{
-					Name: field.FieldName,
-
-					// TODO support enumerables in tsfile
-					Hint: hint,
-				})
-			}
-
-			cluster.Groups = append(cluster.Groups, group)
-		}
-
-		handle.baseModel.Inputs = append(handle.baseModel.Inputs, cluster)
-	}
-
-	// TODO seed selected subnetworks from other sessions
-
-	// Generate network framework. We want our latest two actors to be regr
-	// linear which will deduce correlations between two possibly dependent
-	// random variables and aggregator which will ensure that value is steady
-	regrLinId, err := handle.baseModel.AddActor("regr_lin", yatima.ActorTimeNone,
-		make([]yatima.PinIndex, 2))
-	if err != nil {
-		return err
-	}
-
-	// TODO replace with stddev?
-	_, err = handle.baseModel.AddActor("aggr_avg", yatima.ActorTimeEnd,
-		[]yatima.PinIndex{handle.baseModel.FindActorOutput(regrLinId, 0)})
-	if err != nil {
-		return err
-	}
-
-	// Dump base model to file
-	modelFile, err := os.Create(filepath.Join(handle.session.path, "model.yab"))
-	if err != nil {
-		return err
-	}
-	defer modelFile.Close()
-
-	yabw, err := yatima.NewWriter(modelFile)
-	if err != nil {
-		return err
-	}
-	defer yabw.Close()
-
-	return yabw.AddBaseModel(handle.baseModel)
-}
-
-func (state *trainingState) trainLoop() {
-	for {
-		handle := <-state.modelChan
-		modelSig := handle.model.Signature()
-
-		prog, err := handle.model.Link()
-		if err != nil {
-			handle.handle.log.Printf("Cannot link %s: %v", modelSig, err)
-			continue
-		}
-
-		path, err := handle.handle.session.makeDirs(modelSig)
-		if err != nil {
-			handle.handle.log.Printf("Cannot create dir for %s: %v", modelSig, err)
-			continue
-		}
-
-		err = state.dumpLinkedProgram(path, handle.model, prog)
-		if err != nil {
-			handle.handle.log.Printf("Cannot dump %s: %v", modelSig, err)
-			continue
-		}
-	}
-}
-
-func (state *trainingState) dumpLinkedProgram(path string, model *yatima.Model,
-	prog *yatima.LinkedProgram) (err error) {
-
-	yabFile, err := os.Create(filepath.Join(path, "program.yab"))
-	if err != nil {
-		return
-	}
-	defer yabFile.Close()
-
-	yabWriter, err := yatima.NewWriter(yabFile)
-	if err != nil {
-		return
-	}
-
-	err = yabWriter.AddModel(model)
-	if err == nil {
-		yabWriter.AddLinkedProgram(prog)
-	}
-	yabWriter.Close()
-
-	return
 }

@@ -66,7 +66,6 @@ func TestAssembler(t *testing.T) {
 
 	prog := programs[0]
 	validateSummator(t, prog)
-
 }
 
 func testAssemblerError(t *testing.T, expClass yatima.CompilerErrorClass, pText string) {

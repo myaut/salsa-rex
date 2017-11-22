@@ -10,7 +10,7 @@ import (
 	"yatima"
 )
 
-func dumpFile(inFile string) (err error) {
+func dumpFile(inFile string, doShowModel bool) (err error) {
 	inf, err := os.Open(inFile)
 	if err != nil {
 		return
@@ -26,6 +26,10 @@ func dumpFile(inFile string) (err error) {
 	yabr, err := yatima.NewReader(inf, strf)
 	if err != nil {
 		return
+	}
+
+	if doShowModel {
+		return showModel(yabr)
 	}
 
 	for {
@@ -162,4 +166,75 @@ func decodeDirective(yabr *yatima.BinaryReader, block yatima.BDBlock) (data, raw
 	}
 
 	return
+}
+
+// Generate model as braces-form and dump to stdout
+func showModel(yabr *yatima.BinaryReader) (err error) {
+	var actorNames []string
+	for {
+		dir, err := yabr.ReadDirective()
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		if dir.Type == yatima.BDProgram {
+			actorNames = append(actorNames, yabr.ReadString(dir.P0))
+		}
+		if dir.Type != yatima.BDModel {
+			err = yabr.IgnoreBlock()
+			if err != nil {
+				return err
+			}
+			continue
+		}
+
+		model, err := yabr.ReadModel()
+		if err != nil {
+			return err
+		}
+
+		// Ignore actors that are connected to the following actors
+		usedActors := make(map[uint32]struct{})
+		for _, actor := range model.Actors {
+			for _, input := range actor.Inputs {
+				if input.Cluster == 0 {
+					usedActors[input.Group-1] = struct{}{}
+				}
+			}
+		}
+
+		// Generate brace form for the actors that are not connected to other actors
+		for actorIndex := range model.Actors {
+			if _, ok := usedActors[uint32(actorIndex)]; ok {
+				continue
+			}
+
+			showModelActor(model, actorIndex, actorNames, 0)
+		}
+	}
+}
+
+func showModelActor(model *yatima.BaseModel, actorIndex int, actorNames []string,
+	indent int) {
+
+	indentStr := strings.Repeat("  ", indent)
+	actor := &model.Actors[actorIndex]
+	fmt.Println(indentStr, actorNames[actor.ProgramIndex], "(")
+
+	for _, input := range actor.Inputs {
+		if input.Cluster == 0 {
+			showModelActor(model, int(input.Group-1), actorNames, indent+1)
+		} else {
+			pinCluster := model.Inputs[input.Cluster-1]
+			pinGroup := pinCluster.Groups[input.Group]
+			pin := pinGroup.Pins[input.Pin]
+
+			fmt.Println(indentStr, "  ", pinCluster.Name, ".", pinGroup.Name, ".",
+				pin.Name, ",")
+		}
+	}
+
+	fmt.Println(indentStr, " )")
 }

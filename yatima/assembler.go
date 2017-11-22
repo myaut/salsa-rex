@@ -63,8 +63,8 @@ var instructionDescriptors []instructionDescr = []instructionDescr{
 	instructionDescr{instr: SHR, flags: ifWrite | ifBinary, format: "%o = %0 >> %1"},
 	instructionDescr{instr: ABS, flags: ifWrite, format: "%o = abs %1"},
 	instructionDescr{instr: JMP, flags: ifJump, format: "%jo go"},
-	instructionDescr{instr: JEQ, flags: ifJump, format: "%jo if %0 == %1"},
-	instructionDescr{instr: JNE, flags: ifJump, format: "%jo if %0 != %1"},
+	instructionDescr{instr: JEQ, flags: ifJump | ifBinary, format: "%jo if %0 == %1"},
+	instructionDescr{instr: JNE, flags: ifJump | ifBinary, format: "%jo if %0 != %1"},
 }
 
 var registerHintNames map[string]RegisterHintType = map[string]RegisterHintType{
@@ -706,15 +706,17 @@ func (state *compilerState) addInOutReg(reg RegisterIndex, regs []RegisterIndex,
 }
 
 func (state *compilerState) compileReturn() {
-	// Generate CALL stubs for network linker and ret instruction
-	if state.inRegs != nil {
-		for _, reg := range state.inRegs {
+	// Generate CALL stubs for network linker and ret instruction. Output regs
+	// go first so they will be pushed on stack first and extracted later (we
+	// want to go through siblings in the beginning)
+	if state.outRegs != nil {
+		for _, reg := range state.outRegs {
 			state.prog.Instructions = append(state.prog.Instructions,
 				Instruction{I: CALL, RO: reg})
 		}
 	}
-	if state.outRegs != nil {
-		for _, reg := range state.outRegs {
+	if state.inRegs != nil {
+		for _, reg := range state.inRegs {
 			state.prog.Instructions = append(state.prog.Instructions,
 				Instruction{I: CALL, RO: reg})
 		}

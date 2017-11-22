@@ -15,7 +15,7 @@ Yatima Assembler (YAS)
 Usage: yas subcommand [options] [args...]
 Subcommands:
 	as -o binary.yab source1.yas...
-	dump binary.yab
+	dump [-m] binary.yab
 `
 
 func main() {
@@ -40,7 +40,16 @@ func main() {
 
 		err = assemble(*outFile, compile.Args())
 	case "dump":
-		err = dumpFile(os.Args[2])
+		dump := flag.NewFlagSet("dump", flag.ExitOnError)
+		showModel := dump.Bool("m", false, "show model")
+		dump.Parse(os.Args[2:])
+
+		if dump.NArg() != 1 {
+			err = fmt.Errorf("Only one input is expected")
+			break
+		}
+
+		err = dumpFile(dump.Args()[0], *showModel)
 	case "-h":
 		fmt.Println(usage)
 	default:

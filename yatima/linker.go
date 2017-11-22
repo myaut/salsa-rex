@@ -13,7 +13,9 @@ import (
 type LinkedProgram struct {
 	Instructions []Instruction
 
-	Registers   []PinIndex
+	Registers []PinIndex
+	NumInputs int
+
 	EntryPoints []uint32
 	Values      []int64
 }
@@ -135,7 +137,7 @@ func (linker *linkerState) allocateRegisters() {
 	// staticTable is sorted by default as we append values through iterating
 	// with increasing indeces
 
-	baseInputReg := uint32(RL7) + 1 // == 12
+	baseInputReg := uint32(RI0) // == 12
 	baseStaticReg := baseInputReg + uint32(len(inputTable))
 	baseValueReg := baseStaticReg + uint32(len(staticTable))
 
@@ -200,13 +202,20 @@ func (linker *linkerState) allocateRegisters() {
 		progs[actor.ProgramIndex] = linkedActor.baseValueReg
 	}
 
+	linker.prog.NumInputs = len(inputTable)
 	linker.prog.Registers = append(inputTable, staticTable...)
+
+	for len(linker.prog.Registers) < int(RV) {
+		// Pad registers table with not-connected pins. We do this so we can
+		// properly use near jump encoding
+		linker.prog.Registers = append(linker.prog.Registers, PinIndex{})
+	}
 }
 
 func (linker *linkerState) generateCallVector() {
 	// Call vector is similar in concept to interrupt vector: first instructions
 	// are the calls to first input actors to be activated when input is updated
-	baseInputReg := RL7 + 1
+	baseInputReg := RI0
 	linker.callTails = make(map[RegisterIndex]uint32)
 
 	// Add call vector slot for RT at window and RT at end (RT + 1 which is RIP
@@ -279,8 +288,15 @@ func (linker *actorLinkerState) linkInstruction(instruction Instruction) Instruc
 	}
 	linker.mapRegister(&instruction.RI1)
 
-	if iFlags&ifWrite != 0 || iFlags&ifJump == 0 || instruction.RO >= RV {
-		linker.mapRegister(&instruction.RO)
+	if iFlags&ifJump == 0 {
+		if iFlags&ifWrite != 0 || instruction.RO >= RV {
+			linker.mapRegister(&instruction.RO)
+		}
+	} else {
+		// Jump instruction -- map register RO only for far call (via value)
+		if instruction.RO >= RV {
+			linker.mapRegister(&instruction.RO)
+		}
 	}
 
 	return instruction
@@ -416,13 +432,15 @@ func (linker *actorLinkerState) mapRegister(reg *RegisterIndex) {
 	} else if reg.isStaticRegister() {
 		*reg = RegisterIndex(linker.linkedActor.baseStaticReg +
 			uint32(reg.staticRegisterIndex()))
+	} else if *reg >= RV {
+		*reg = RegisterIndex(linker.linkedActor.baseValueReg) + *reg - RV
 	}
 
 	// local or global register -- keep mapping to first 12 registers
 }
 
 func (linker *linkerState) getSubscribedGroups(reg RegisterIndex) []int {
-	inputIndex := uint32(reg - RL7 - 1)
+	inputIndex := uint32(reg - RI0)
 	input := linker.prog.Registers[inputIndex]
 
 	subscribedGroups := []int{int(input.Cluster<<12) + int(input.Group)}
@@ -481,7 +499,7 @@ func (linker *linkerState) compressCalls() {
 			if count == 1 && instructions[index].RI1 == RegisterIndex(curIndex+1) {
 				// A special case when we have one output and our subscriber
 				// is located directly below. We can generalize this case by
-				// further relocating calls, but don't want to now
+				// further relocating calls, but don't want to for now
 				// Anyway, drop the only CALL and last RET
 				instructions[index] = Instruction{I: NOP}
 			} else {
@@ -507,20 +525,35 @@ func (linker *linkerState) compressCalls() {
 		lar.actor = actor
 	}
 
+	// Pass 2a -- since we're planning to update instructions, first update
+	// call addresses
 	startIndex := uint32(0)
 	for curIndex := uint32(0); curIndex < uint32(len(instructions)); curIndex++ {
 		if instructions[curIndex].I != NOP {
 			if startIndex != curIndex {
-				// Since we moved some instruction, update some pointer to it
+				// Since we moved some instruction, update some pointers to it
 				if lar, ok := references[curIndex]; ok {
 					for _, callIndex := range lar.calls {
-						instructions[callIndex].RI1 = RegisterIndex(startIndex)
+						newCallIndex := callIndex
+						if callIndex < curIndex {
+							callIndex -= (curIndex - startIndex)
+						}
+						instructions[newCallIndex].RI1 = RegisterIndex(startIndex)
 					}
 					if lar.actor != nil {
 						lar.actor.firstInstruction = startIndex
 					}
 				}
+			}
+			startIndex++
+		}
+	}
 
+	// Pass 2b -- compress instructions by removing NOP windows
+	startIndex = uint32(0)
+	for curIndex := uint32(0); curIndex < uint32(len(instructions)); curIndex++ {
+		if instructions[curIndex].I != NOP {
+			if startIndex != curIndex {
 				instructions[startIndex] = instructions[curIndex]
 			}
 			startIndex++
@@ -529,4 +562,44 @@ func (linker *linkerState) compressCalls() {
 
 	// Cut instructions array: remove dead instructions
 	linker.prog.Instructions = instructions[:startIndex]
+}
+
+// Return slice of registers map corresponding to base input group and base
+// index of pin to be provided for WriteInput()
+func (prog *LinkedProgram) FindInputs(base PinIndex) ([]PinIndex, uint32) {
+	baseIndex := sort.Search(prog.NumInputs,
+		func(i int) bool { return !prog.Registers[i].Less(base) })
+	if baseIndex == -1 {
+		return nil, 0
+	}
+
+	index := baseIndex
+	for ; index < len(prog.Registers); index++ {
+		pin := prog.Registers[index]
+		if base.Cluster != pin.Cluster || base.Group != pin.Group {
+			break
+		}
+	}
+
+	return prog.Registers[baseIndex:index], uint32(baseIndex)
+}
+
+// Linearly (via O(n*m)) find necessary general outputs for the model/program
+// and return offsets in
+func (prog *LinkedProgram) FindOutputs(pinIndeces []PinIndex) (indeces []uint32) {
+	for index := prog.NumInputs; index < len(prog.Registers); index++ {
+		pin := prog.Registers[index]
+		for _, pin2 := range pinIndeces {
+			if pin == pin2 {
+				indeces = append(indeces, uint32(RI0)+uint32(index))
+				break
+			}
+		}
+
+		if len(indeces) == len(pinIndeces) {
+			return
+		}
+	}
+
+	return
 }

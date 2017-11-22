@@ -26,7 +26,7 @@ func runTsfTest(t *testing.T, create func(t *testing.T, f *os.File) *tsfile.TSFi
 	tsf1 := create(t, f)
 	read(t, tsf1)
 
-	err = tsf1.Close()
+	storage, err := tsf1.Detach()
 	if err != nil {
 		t.Error(err)
 	}
@@ -34,7 +34,7 @@ func runTsfTest(t *testing.T, create func(t *testing.T, f *os.File) *tsfile.TSFi
 	t.Log("Re-read file", f.Name())
 
 	// Re-read file and run checks again
-	tsf2, err := tsfile.LoadTSFile(f)
+	tsf2, err := tsfile.LoadTSFile(storage)
 	if err != nil {
 		t.Error(err)
 	}

@@ -18,13 +18,12 @@
 	.REG %c random		; ratio between %a and %b
 	.REG %o1 random		; regression error compared to last ratio
 	.REG %s0 static last
-	.TRANS %a %b
 
 	.ENTRY %a %b
-		a = %a << 16
-		%c = a / %b
+		:END if %b == 0
+		%c = %a / %b
 		:END if last == 0
-			%o1 = last - cur
+			%o1 = last - %c
 			%o1 = abs %o1
 		:END
 		last = %c

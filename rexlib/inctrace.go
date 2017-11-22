@@ -16,10 +16,41 @@ const (
 	defferedTraceCloseDelay time.Duration = 5 * time.Second
 )
 
+type incidentSeriesData struct {
+	// Initialized at creating incidentSeriesData
+	index int
+	tag   tsfile.TSFPageTag
+	count int
+
+	// Next extracted data buffer, its time and index
+	nextIndex int
+	nextTime  tsfile.TSTimeStart
+	next      []byte
+
+	// Reference to trace and flag saying that this is first series for this
+	// trace, hence it is owner of it and should release it
+	trace      *tsfile.TSFile
+	traceOwner bool
+
+	deserializer *tsfile.TSFDeserializer
+}
+
+type IncidentEvent struct {
+	IncidentIndex int
+	SeriesIndex   int
+
+	Buffer       []byte
+	Deserializer *tsfile.TSFDeserializer
+}
+
+type incidentSeriesDataReader struct {
+	series []incidentSeriesData
+}
+
 func (incident *Incident) createTraceFile() (err error) {
-	incident.traceFile, err = os.Create(filepath.Join(incident.path, "trace.tsf"))
+	traceFile, err := os.Create(filepath.Join(incident.path, "trace.tsf"))
 	if err == nil {
-		incident.trace, err = tsfile.NewTSFile(incident.traceFile,
+		incident.trace, err = tsfile.NewTSFile(traceFile,
 			tsfile.TSFFormatV2|tsfile.TSFFormatExt)
 	}
 
@@ -30,33 +61,23 @@ func (incident *Incident) GetTraceFile() (tsf *tsfile.TSFile, err error) {
 	incident.mtx.Lock()
 	defer incident.mtx.Unlock()
 
-	if incident.traceFile == nil {
-		err = incident.loadTraceFile()
-	} else {
-		incident.traceCloser.Notify()
+	if incident.trace != nil {
+		trace := incident.trace.Get()
+		if trace != nil {
+			return trace, nil
+		}
 	}
+
+	// Return first reference to trace file
+	err = incident.loadTraceFile()
 	return incident.trace, err
 }
 
 func (incident *Incident) loadTraceFile() (err error) {
-	if incident.traceCloser == nil {
-		incident.traceCloser = newCloserWatchdog(defferedTraceCloseDelay)
-	}
-
-	incident.traceFile, err = os.Open(filepath.Join(incident.path, "trace.tsf"))
+	traceFile, err := os.Open(filepath.Join(incident.path, "trace.tsf"))
 	if err == nil {
-		incident.trace, err = tsfile.LoadTSFile(incident.traceFile)
+		incident.trace, err = tsfile.LoadTSFile(traceFile)
 	}
-
-	go func(incident *Incident) {
-		incident.traceCloser.Wait()
-
-		incident.mtx.Lock()
-		defer incident.mtx.Unlock()
-
-		incident.traceFile = nil
-		incident.closeTraceFile()
-	}(incident)
 
 	return
 }
@@ -106,4 +127,96 @@ func (handle *IncidentHandle) logTraceStatistics() {
 	}
 
 	handle.providerOutput.Log.Println(statBuf.String())
+}
+
+// Create incident series data reader for internal needs. It is similar to
+// reader implemented by rex binary, but doesn't need bulk load (as we don't
+// need RPC ops here), hence it has a bit simpler implementation
+func (reader *incidentSeriesDataReader) AddIncident(index int, incident *Incident) error {
+	trace, err := incident.GetTraceFile()
+	if err != nil {
+		return err
+	}
+
+	first := true
+	for tag, tagEnd := trace.GetDataTags(); tag < tagEnd; tag++ {
+		schema, err := trace.GetSchema(tag)
+		if err != nil {
+			return err
+		}
+
+		reader.series = append(reader.series, incidentSeriesData{
+			index:        index,
+			tag:          tag,
+			count:        trace.GetEntryCount(tag),
+			deserializer: tsfile.NewDeserializer(schema),
+
+			trace:      trace,
+			traceOwner: first,
+		})
+		reader.fetch(len(reader.series) - 1)
+		first = false
+	}
+
+	return nil
+}
+
+func (reader *incidentSeriesDataReader) fetch(index int) error {
+	seriesData := &reader.series[index]
+	if seriesData.count > seriesData.nextIndex {
+		bufs := [][]byte{nil}
+		err := seriesData.trace.GetEntries(seriesData.tag, bufs, seriesData.nextIndex)
+		if err != nil {
+			return err
+		}
+
+		seriesData.next = bufs[0]
+		seriesData.nextTime = seriesData.deserializer.GetStartTime(seriesData.next)
+		seriesData.nextIndex++
+	}
+
+	return nil
+}
+
+// Returns next item with smallest time. If no more items exist, returns nil
+// Note that returned buffer is invalidated on the next read operation,
+func (reader *incidentSeriesDataReader) Next() (IncidentEvent, error) {
+	var minTime tsfile.TSTimeStart
+	minIndex := -1
+	for index, seriesData := range reader.series {
+		if seriesData.count <= seriesData.nextIndex {
+			continue
+		}
+		if minIndex < 0 || seriesData.nextTime < minTime {
+			minIndex = index
+		}
+	}
+
+	if minIndex < 0 {
+		// No more valid entries are found, return nils
+		return IncidentEvent{}, nil
+	}
+
+	// Return current entry and fetch next one
+	seriesData := &reader.series[minIndex]
+	event := IncidentEvent{
+		IncidentIndex: seriesData.index,
+		SeriesIndex:   minIndex,
+		Buffer:        seriesData.next,
+		Deserializer:  seriesData.deserializer,
+	}
+	return event, reader.fetch(minIndex)
+}
+
+func (reader *incidentSeriesDataReader) Put() (err error) {
+	for _, seriesData := range reader.series {
+		if seriesData.traceOwner {
+			err2 := seriesData.trace.Put()
+			if err2 != nil {
+				err = err2
+			}
+		}
+	}
+
+	return
 }

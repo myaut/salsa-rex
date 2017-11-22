@@ -183,6 +183,11 @@ type TSFileStats struct {
 	Series []TSFSeriesStats `json:"series"`
 }
 
+type TSFileStorage interface {
+	io.ReadWriteSeeker
+	io.Closer
+}
+
 type TSFile struct {
 	header      TSFHeader
 	pageHeaders []TSFPageHeader
@@ -190,7 +195,10 @@ type TSFile struct {
 
 	// Only single thread can seek and perform I/O at a moment
 	mu   sync.RWMutex
-	file io.ReadWriteSeeker
+	file TSFileStorage
+
+	// Number of entities holding reference to this file
+	refCount int32
 
 	// Accessible version of ts file anf version-specific values
 	formatFlags TSFFormatFlags
@@ -217,18 +225,19 @@ type TSFile struct {
 	pageCache      map[TSFPageId]*tsfPage
 }
 
-func newTSFile(file io.ReadWriteSeeker) *TSFile {
+func newTSFile(file TSFileStorage) *TSFile {
 	tsf := new(TSFile)
 	tsf.file = file
 	tsf.pageCache = make(map[TSFPageId]*tsfPage)
 	tsf.dataPagesCache = make(map[TSFPageTag][]TSFPageId)
 	tsf.pageSize = pageSize
+	tsf.refCount = int32(1)
 
 	return tsf
 }
 
 // Creates new TSFile object for writing
-func NewTSFile(file io.ReadWriteSeeker, formatFlags TSFFormatFlags) (*TSFile, error) {
+func NewTSFile(file TSFileStorage, formatFlags TSFFormatFlags) (*TSFile, error) {
 	if (formatFlags & ^tsFileSupportedFormatFlags) != 0 ||
 		(formatFlags&tsFileFormatVersionFlags) == 0 {
 
@@ -249,7 +258,7 @@ func NewTSFile(file io.ReadWriteSeeker, formatFlags TSFFormatFlags) (*TSFile, er
 }
 
 // Loads existing TS file
-func LoadTSFile(file io.ReadWriteSeeker) (*TSFile, error) {
+func LoadTSFile(file TSFileStorage) (*TSFile, error) {
 	tsf := newTSFile(file)
 
 	// Read first header
@@ -488,9 +497,37 @@ func (header *TSFHeader) findSuperBlock() *TSFSuperBlock {
 	return lastSb
 }
 
-// Closes TSFile and writes pages (doesn't close undelying file)
-func (tsf *TSFile) Close() error {
-	return tsf.writePages(true)
+// Gets TSFile reference or returns nil if file was already closed
+func (tsf *TSFile) Get() *TSFile {
+	if atomic.AddInt32(&tsf.refCount, 1) == 1 {
+		atomic.StoreInt32(&tsf.refCount, 0)
+		return nil
+	}
+	return tsf
+}
+
+// Detach current reference of TSFile from underlying storage and if it is
+// last reference, return underlying storage object
+func (tsf *TSFile) Detach() (TSFileStorage, error) {
+	err := tsf.writePages(true)
+	if atomic.AddInt32(&tsf.refCount, -1) <= 0 {
+		return tsf.file, err
+	}
+
+	return nil, err
+}
+
+// Puts TSFile reference, writes pages and potentially closes underlying file
+func (tsf *TSFile) Put() error {
+	f, err := tsf.Detach()
+
+	if f != nil {
+		err2 := f.Close()
+		if err == nil {
+			return err2
+		}
+	}
+	return err
 }
 
 // Adds new schema to a file and returns allocated tag
@@ -857,7 +894,7 @@ func (tsf *TSFile) writePage(page *tsfPage, pageId TSFPageId) error {
 	return err
 }
 
-// Returns first and last tags which have schemas
+// Returns first and last tags (non-inclusive) which have schemas
 func (tsf *TSFile) GetDataTags() (TSFPageTag, TSFPageTag) {
 	tsf.mu.RLock()
 	defer tsf.mu.RUnlock()

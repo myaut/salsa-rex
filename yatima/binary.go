@@ -60,6 +60,7 @@ type BDBlock struct {
 	Type   BinaryDirectiveType
 	Offset int
 	Length int
+	Depth  int
 }
 
 type BinaryReader struct {
@@ -452,6 +453,7 @@ func (yabr *BinaryReader) ReadDirective() (dir BinaryDirective, err error) {
 		yabr.stack = append(yabr.stack, BDBlock{
 			Type:   dir.Type,
 			Length: int(dir.Length),
+			Depth:  int(len(yabr.stack)),
 		})
 	}
 
@@ -541,7 +543,7 @@ func (yabr *BinaryReader) ReadProgram() (*Program, error) {
 
 	block := yabr.getBlock()
 	if block.Type != BDProgram || block.Offset > 0 {
-		return nil, fmt.Errorf("ReadProgram() should be called after program directive")
+		return nil, fmt.Errorf("ReadProgram() should be called after BDModel directive")
 	}
 
 	for block.Length > 1 {
@@ -612,4 +614,62 @@ func (yabr *BinaryReader) ReadProgram() (*Program, error) {
 	}
 
 	return prog, nil
+}
+
+func (yabr *BinaryReader) ReadModel() (*BaseModel, error) {
+	model := new(BaseModel)
+
+	block := yabr.getBlock()
+	if block.Type != BDModel || block.Offset > 0 {
+		return nil, fmt.Errorf("ReadModel() should be called after BDModel directive")
+	}
+
+	modelDepth := block.Depth
+	for block.Depth > modelDepth || block.Length > 1 {
+		dir, err := yabr.ReadDirective()
+		if err != nil {
+			return nil, err
+		}
+
+		switch dir.Type {
+		case BDPinCluster:
+			model.Inputs = append(model.Inputs, PinCluster{
+				Name: yabr.ReadString(dir.P0),
+			})
+		case BDPinGroup:
+			pinCluster := &model.Inputs[len(model.Inputs)-1]
+			pinCluster.Groups = append(pinCluster.Groups, PinGroup{
+				Name: yabr.ReadString(dir.P0),
+			})
+		case BDPin:
+			pin := Pin{
+				Name: yabr.ReadString(dir.P0),
+				Hint: RegisterHintType(dir.P1),
+			}
+
+			if block.Type == BDActorInstance {
+				actor := &model.Actors[len(model.Actors)-1]
+				actor.Outputs = append(actor.Outputs, pin)
+			} else if block.Type == BDPinGroup {
+				pinCluster := &model.Inputs[len(model.Inputs)-1]
+				pinGroup := &pinCluster.Groups[len(pinCluster.Groups)-1]
+				pinGroup.Pins = append(pinGroup.Pins, pin)
+			}
+		case BDActorInstance:
+			model.Actors = append(model.Actors, ActorInstance{
+				ProgramIndex: dir.P0,
+				TimeMode:     ActorTimeMode(dir.P1),
+			})
+		case BDActorInput:
+			var pinIndex PinIndex
+			pinIndex.Decode(dir.P0)
+
+			actor := &model.Actors[len(model.Actors)-1]
+			actor.Inputs = append(actor.Inputs, pinIndex)
+		}
+
+		block = yabr.getBlock()
+	}
+
+	return model, nil
 }

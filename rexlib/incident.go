@@ -104,9 +104,7 @@ type Incident struct {
 
 	// Reference to open trace file for running incidents or opened file
 	// for completed incidents
-	trace       *tsfile.TSFile
-	traceFile   *os.File
-	traceCloser *closerWatchdog
+	trace *tsfile.TSFile
 }
 
 type IncidentDescriptor struct {
@@ -374,8 +372,7 @@ func (incident *Incident) createHandle() (handle *IncidentHandle, err error) {
 		return nil, fmt.Errorf("Cannot create trace TS file: %v", err)
 	}
 
-	handle.traceFile = incident.traceFile
-	handle.providerOutput.Trace = incident.trace
+	handle.providerOutput.Trace = incident.trace.Get()
 
 	handle.logFile, err = os.OpenFile(filepath.Join(incident.path, "incident.log"),
 		os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
@@ -465,18 +462,7 @@ func (handle *IncidentHandle) Close() {
 }
 
 func (incident *Incident) closeTraceFile() (err error) {
-	if incident.traceFile != nil {
-		err = incident.trace.Close()
-		if err != nil {
-			return
-		}
-
-		err = incident.traceFile.Close()
-	}
-
-	incident.traceFile = nil
-	incident.trace = nil
-	return
+	return incident.trace.Put()
 }
 
 func (handle *IncidentHandle) run() {

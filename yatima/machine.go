@@ -1,5 +1,9 @@
 package yatima
 
+import (
+	"fmt"
+)
+
 // Yatima (named after main hero of "Diaspora" by Greg Egan, ve was an AI)
 // is is engine for machine learning based on experiment's time series.
 //
@@ -102,3 +106,185 @@ const (
 	JEQ // %RO if %RI0 == %RI1
 	JNE // %RO if %RI0 != %RI1
 )
+
+type Machine struct {
+	Program *LinkedProgram
+
+	// Big registers table -- contains state of all actors
+	Registers []int64
+
+	// Stack of addresses that should be called. No state is saved here as
+	// register table is used for that. Note that stack is operates like list
+	// and can contain two sequental addresses written which are actually
+	// siblings (i.e. in the case of writing multiple inputs and notifying machine)
+	Stack []uint32
+}
+
+// Creates a machine which is ready to execute it
+func (program *LinkedProgram) NewMachine() *Machine {
+	regTableSize := int(RL7+1) + len(program.Registers) + len(program.Values)
+	machine := &Machine{
+		Program:   program,
+		Registers: make([]int64, regTableSize),
+		Stack:     make([]uint32, 0, 16),
+	}
+
+	// Copy initial program's values
+	copy(machine.Registers[regTableSize-len(program.Values):],
+		program.Values)
+
+	return machine
+}
+
+// Tries to write to machine register or panics if register is read only
+func (machine *Machine) WriteInput(pinIndex uint32, value int64) {
+	pin := machine.Program.Registers[pinIndex]
+	if pin.Cluster == 0 {
+		panic("only inputs can be written")
+	}
+
+	regIndex := RL7 + 1 + RegisterIndex(pinIndex)
+	machine.Registers[regIndex] = value
+
+	machine.notify(pinIndex + 2)
+}
+
+func (machine *Machine) WriteTime(value int64, mode ActorTimeMode) {
+	machine.Registers[RT] = value
+
+	switch mode {
+	case ActorTimeWindow:
+		machine.notify(0)
+	case ActorTimeEnd:
+		machine.notify(1)
+	}
+}
+
+// Notify on register update -- save corresponding call address to stack
+func (machine *Machine) notify(vecIndex uint32) {
+	callInstruction := machine.Program.Instructions[vecIndex]
+	if callInstruction.RI1 != 0 {
+		machine.Stack = append(machine.Stack, uint32(callInstruction.RI1))
+	}
+}
+
+func (machine *Machine) Run() {
+	for len(machine.Stack) > 0 {
+		stackHead := len(machine.Stack) - 1
+		address := machine.Stack[stackHead]
+		machine.Stack = machine.Stack[:stackHead]
+
+		machine.runAt(address)
+	}
+}
+
+func (machine *Machine) runAt(address uint32) {
+	instructions := machine.Program.Instructions
+	registers := machine.Registers
+
+	var instr Instruction
+
+instructionLoop:
+	for instr.I != RET {
+		registers[RIP] = int64(address)
+		instr = instructions[address]
+		address++
+
+		switch instr.I {
+		case NOP, RET:
+			continue instructionLoop
+		case CALL:
+			// TODO handle RI0 & segments
+			machine.Stack = append(machine.Stack, uint32(instr.RI1))
+			continue instructionLoop
+		case INC:
+			registers[instr.RO]++
+			continue instructionLoop
+		case DEC:
+			registers[instr.RO]--
+			continue instructionLoop
+		}
+
+		// The following instructions use RI0/RI1 as arithmetic operands, so
+		// dereference values. In worst case, if they don't, operand will be set
+		// to 0 and we'll read RZ
+		i0, i1 := registers[instr.RI0], registers[instr.RI1]
+
+		// Small trick for conditional jumps as goto case doesn't feel well. If
+		// condition is false, continue with next address. If it's true, treat
+		// jump as unconditional (see below)
+		switch instr.I {
+		case JNE:
+			if i0 == i1 {
+				continue instructionLoop
+			}
+		case JEQ:
+			if i0 != i1 {
+				continue instructionLoop
+			}
+		}
+
+		switch instr.I {
+		case JNE, JEQ, JMP:
+			// Perform near or far jump (depending on the value)
+			var offset int64
+			if instr.RO >= RV {
+				offset = registers[instr.RO]
+			} else {
+				offset = int64(instr.RO) - int64(nearJumpRegister)
+			}
+			address = uint32(int64(address-1) + offset)
+			continue instructionLoop
+
+		// Arithmetic operations -- nothing interesting here
+		case MOV:
+			registers[instr.RO] = i1
+		case ADD:
+			registers[instr.RO] = i0 + i1
+		case SUB:
+			registers[instr.RO] = i0 - i1
+		case MUL:
+			registers[instr.RO] = i0 * i1
+		case DIV:
+			registers[instr.RO] = i0 / i1
+		case SHL:
+			registers[instr.RO] = i0 << uint(i1)
+		case SHR:
+			registers[instr.RO] = i0 >> uint(i1)
+		case ABS:
+			if i1 >= 0 {
+				registers[instr.RO] = i1
+			} else {
+				registers[instr.RO] = -i1
+			}
+		}
+
+	}
+}
+
+func (machine *Machine) DumpRegisters(printf func(string, ...interface{})) {
+
+	for index, value := range machine.Registers {
+		origIndex := index
+
+		var name string
+		if RegisterIndex(index) <= RL7 {
+			name = RegisterIndex(index).Name()
+		} else {
+			index -= int(RL7 + 1)
+			if index < len(machine.Program.Registers) {
+				reg := machine.Program.Registers[index]
+				if reg.IsZero() {
+					// Padded register, nothing interesting here
+					continue
+				}
+
+				name = fmt.Sprintf("%d:%d:%d", reg.Cluster, reg.Group, reg.Pin)
+			} else {
+				name = fmt.Sprintf("%%v%x", index-len(machine.Program.Registers))
+			}
+		}
+
+		printf("%8s [%4x] = %08x ", name, origIndex, value)
+	}
+}

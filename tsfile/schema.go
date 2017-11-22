@@ -335,12 +335,14 @@ func (schema *TSFSchemaHeader) MarshalJSON() ([]byte, error) {
 // Deserialializer works on top of raw buffers ([]byte) and processes raw
 // fields from it
 type tsFieldDeserializerFunc func(buf []byte) interface{}
+type tsFieldDeserializerI64Func func(buf []byte) int64
 type tsFieldDeserializer struct {
 	name   string
 	offset uint64
 	size   uint64
 
-	impl tsFieldDeserializerFunc
+	impl    tsFieldDeserializerFunc
+	implI64 tsFieldDeserializerI64Func
 }
 
 type TSFDeserializer struct {
@@ -369,20 +371,35 @@ func NewDeserializer(schema *TSFSchemaHeader) *TSFDeserializer {
 			field.impl = func(buf []byte) interface{} {
 				return TSBoolean(binary.LittleEndian.Uint32(buf)).ToBoolean()
 			}
+			field.implI64 = func(buf []byte) int64 {
+				return int64(binary.LittleEndian.Uint32(buf))
+			}
 		case TSFFieldInt, TSFFieldEnumerable:
 			switch fieldHdr.Size {
 			case 1:
 				field.impl = func(buf []byte) interface{} { return int8(buf[0]) }
+				field.implI64 = func(buf []byte) int64 {
+					return int64(buf[0])
+				}
 			case 2:
 				field.impl = func(buf []byte) interface{} {
 					return int16(binary.LittleEndian.Uint16(buf))
+				}
+				field.implI64 = func(buf []byte) int64 {
+					return int64(binary.LittleEndian.Uint16(buf))
 				}
 			case 4:
 				field.impl = func(buf []byte) interface{} {
 					return int32(binary.LittleEndian.Uint32(buf))
 				}
+				field.implI64 = func(buf []byte) int64 {
+					return int64(binary.LittleEndian.Uint32(buf))
+				}
 			case 8:
 				field.impl = func(buf []byte) interface{} {
+					return int64(binary.LittleEndian.Uint64(buf))
+				}
+				field.implI64 = func(buf []byte) int64 {
 					return int64(binary.LittleEndian.Uint64(buf))
 				}
 			}
@@ -391,10 +408,16 @@ func NewDeserializer(schema *TSFSchemaHeader) *TSFDeserializer {
 			field.impl = func(buf []byte) interface{} {
 				return TSTimeStart(binary.LittleEndian.Uint64(buf))
 			}
+			field.implI64 = func(buf []byte) int64 {
+				return int64(binary.LittleEndian.Uint64(buf))
+			}
 		case TSFFieldEndTime:
 			deserializer.EndTimeIndex = fi
 			field.impl = func(buf []byte) interface{} {
 				return TSTimeEnd(binary.LittleEndian.Uint64(buf))
+			}
+			field.implI64 = func(buf []byte) int64 {
+				return int64(binary.LittleEndian.Uint64(buf))
 			}
 		case TSFFieldFloat:
 			switch fieldHdr.Size {
@@ -424,6 +447,13 @@ func (deserializer *TSFDeserializer) Get(buf []byte, idx int) (string, interface
 	buf = buf[field.offset : field.offset+field.size]
 
 	return field.name, field.impl(buf)
+}
+
+func (deserializer *TSFDeserializer) GetInt64(buf []byte, idx int) (string, int64) {
+	field := deserializer.fields[idx]
+	buf = buf[field.offset : field.offset+field.size]
+
+	return field.name, field.implI64(buf)
 }
 
 func (deserializer *TSFDeserializer) GetStartTime(buf []byte) TSTimeStart {
